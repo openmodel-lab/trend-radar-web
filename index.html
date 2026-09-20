@@ -25,7 +25,7 @@ button,input{font:inherit}.shell{max-width:1260px;margin:auto;padding:24px 24px 
 .spark-grid{stroke:#21324a;stroke-width:1}.spark-line{fill:none;stroke:#66e3a4;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.spark-fill{fill:rgba(102,227,164,.10)}
 .section{margin-top:22px}.section-title{font-size:14px;font-weight:800;margin-bottom:8px}
 .media-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.media-box{border:1px solid var(--line);border-radius:13px;padding:10px;background:rgba(255,255,255,.025)}.media-box span{display:block;color:var(--muted);font-size:10px}.media-box strong{display:block;margin-top:5px;font-size:15px}
-.x-card{border:1px solid var(--line);border-radius:16px;padding:14px;background:rgba(255,255,255,.025)}.x-main{display:flex;justify-content:space-between;gap:12px}.x-rank{font-size:26px;font-weight:800}.x-meta{color:var(--muted);font-size:11px;margin-top:4px}.x-empty{color:var(--muted);font-size:12px}
+.x-card{border:1px solid var(--line);border-radius:16px;padding:14px;background:rgba(255,255,255,.025)}.x-main{display:flex;justify-content:space-between;gap:12px}.x-rank{font-size:26px;font-weight:800}.x-meta{color:var(--muted);font-size:11px;margin-top:4px}.x-empty{color:var(--muted);font-size:12px}.x-search-link{display:inline-flex;align-items:center;gap:6px;margin-top:10px;padding:9px 12px;border:1px solid #31527a;border-radius:999px;color:var(--accent);background:rgba(102,179,255,.07);font-size:12px;font-weight:800;text-decoration:none}.x-search-link:hover{background:rgba(102,179,255,.13);border-color:#4776aa}
 .dev-details{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}.dev-details summary{cursor:pointer;color:var(--muted);font-size:12px}.dev-details .kv{margin-top:12px}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{grid-template-columns:1fr}.hero h2{font-size:30px}}@media(max-width:620px){.shell{padding:18px 14px 42px}.media-grid{grid-template-columns:repeat(2,1fr)}.topbar{margin-bottom:18px}.hero h2{font-size:27px}.cards{grid-template-columns:1fr}.toolbar{align-items:stretch;flex-direction:column;gap:10px;margin:12px 0 18px}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;width:100%}.filter{width:100%;padding:10px 6px;text-align:center;font-size:13px;white-space:nowrap}.toolbar #count{padding-left:2px}.card{min-height:205px}.status span:last-child{display:none}.modal{padding-left:10px;padding-right:10px}.sheet{width:100%;max-height:calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 18px);border-radius:22px 22px 14px 14px}.sheet-top{padding-top:max(16px,env(safe-area-inset-top))}.kv{grid-template-columns:105px 1fr}}
 .x-list-card{background:linear-gradient(180deg,rgba(18,33,53,.96),rgba(12,24,40,.96));border:1px solid var(--line);border-radius:20px;padding:18px;box-shadow:var(--shadow)}
@@ -171,6 +171,8 @@ async function loadChildTopics(x){
 function earlyText(level,score){const l=(level||"none").toLowerCase();if(l==="hot")return "急上昇";if(l==="rising")return "上昇中";if(l==="watch")return "兆候あり";return "兆候なし"}
 function evidenceText(level){const l=(level||"light").toLowerCase();return l==="strong"?"強い":l==="good"?"十分":l==="watch"?"確認中":"弱い"}
 function normMatch(s=""){return String(s).normalize("NFKC").toLowerCase().replace(/^#/,"").replace(/[\s　・_\-—–:：!！?？,，.。()（）【】「」『』]/g,"")}
+function xSearchQuery(label=""){return String(label).normalize("NFKC").replace(/[×｜|]/g," ").replace(/[「」『』【】]/g," ").replace(/\s+/g," ").trim().slice(0,100)}
+function xSearchHref(label=""){const q=xSearchQuery(label);return q?`https://x.com/search?q=${encodeURIComponent(q)}&src=typed_query&f=live`:"https://x.com/explore"}
 function sparkline(rows){
   if(!rows?.length)return '<div class="x-empty">24時間の履歴がまだありません。</div>';
   const vals=rows.map(r=>Number(r.trend_score||0)),w=620,h=150,p=10,max=Math.max(100,...vals),min=0;
@@ -193,6 +195,7 @@ async function detailData(x){
 }
 async function openRow(x){
   $("#mTitle").textContent=x.topic.cluster_label||x.topic.title;
+  const xLabel=x.topic.cluster_label||x.topic.title,xQuery=xSearchQuery(xLabel),xHref=xSearchHref(xLabel);
   const ev=x.sourceEvidence||{},refs=Array.isArray(ev.reference_items)?ev.reference_items:[],rels=Array.isArray(x.relevance)?x.relevance:[];
   const refHtml=refs.map(r=>{const isYt=r.type==="youtube";const tag=sourceTag(isYt?"video":(r.source_type||"news"));const meta=isYt?`再生 ${compact(r.views)}・${compact(r.views_per_hour)}/時`:`TRUST ${fmt(r.trust)}`;return `<div class="ref"><div><span class="source-tag ${esc(tag.key)}">${esc(tag.label)}</span><br><a href="${esc(safeUrl(r.url))}" target="_blank" rel="noopener noreferrer">${esc(r.label||r.type)}</a><div class="ref-meta">${meta}</div></div><div class="ref-score">${isYt?"動画":"参考"}</div></div>`}).join("");
   const relText=rels.slice(0,3).map(r=>`${r.relevance_domain.toUpperCase()} / ${r.category_key} ${r.relevance_level.toUpperCase()}`).join(" ・ ");
@@ -211,7 +214,7 @@ async function openRow(x){
     <div class="media-box"><span>X SIGNAL</span><strong id="xQuick">確認中</strong></div>
   </div></div>
   <div class="section"><div class="section-title">波及</div><div class="x-card">${esc(x.topic.propagation_path||"まだ明確な波及は確認できていません")}</div></div>
-  <div class="section"><div class="section-title">X SIGNAL</div><div id="xSignal" class="x-card"><div class="x-empty">直近24時間を照合中…</div></div></div>
+  <div class="section"><div class="section-title">X SIGNAL</div><div id="xSignal" class="x-card"><div class="x-empty">直近24時間を照合中…</div></div><a class="x-search-link" href="${esc(xHref)}" target="_blank" rel="noopener noreferrer">Xで「${esc(xQuery||xLabel)}」を見る ↗</a></div>
   <div id="childTopics" class="child-list"><div class="section-title">このトレンドの中で何が熱い？</div><div class="live-note">関連トピックを集計中…</div></div>
   ${refHtml?`<div class="refs section"><div class="section-title">ニュース・動画</div>${refHtml}</div>`:""}
   <details class="dev-details"><summary>内部データを見る</summary><div class="kv">
