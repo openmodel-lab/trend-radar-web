@@ -29,10 +29,12 @@ button,input{font:inherit}.shell{max-width:1260px;margin:auto;padding:24px 24px 
 .dev-details{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}.dev-details summary{cursor:pointer;color:var(--muted);font-size:12px}.dev-details .kv{margin-top:12px}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{grid-template-columns:1fr}.hero h2{font-size:30px}}@media(max-width:620px){.shell{padding:18px 14px 42px}.media-grid{grid-template-columns:repeat(2,1fr)}.topbar{margin-bottom:18px}.hero h2{font-size:27px}.cards{grid-template-columns:1fr}.toolbar{align-items:stretch;flex-direction:column;gap:10px;margin:12px 0 18px}.filters{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;width:100%}.filter{width:100%;padding:10px 6px;text-align:center;font-size:13px;white-space:nowrap}.toolbar #count{padding-left:2px}.card{min-height:205px}.status span:last-child{display:none}.modal{padding-left:10px;padding-right:10px}.sheet{width:100%;max-height:calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 18px);border-radius:22px 22px 14px 14px}.sheet-top{padding-top:max(16px,env(safe-area-inset-top))}.kv{grid-template-columns:105px 1fr}}
 .x-list-card{background:linear-gradient(180deg,rgba(18,33,53,.96),rgba(12,24,40,.96));border:1px solid var(--line);border-radius:20px;padding:18px;box-shadow:var(--shadow)}
+.x-group-head{grid-column:1/-1;display:flex;justify-content:space-between;align-items:end;gap:12px;margin-top:8px;padding:8px 2px 0}.x-group-title{font-size:18px;font-weight:800}.x-group-note{color:var(--muted);font-size:11px;text-align:right}.x-group-empty{grid-column:1/-1;color:var(--muted);font-size:12px;padding:4px 2px 12px}
 .x-list-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.x-list-title{font-size:18px;font-weight:800;line-height:1.35;min-width:0;overflow-wrap:anywhere}
 .x-rank-pill{flex:0 0 auto;border:1px solid var(--line);border-radius:999px;padding:6px 10px;font-size:12px;font-weight:800;color:#fff;background:rgba(255,255,255,.04)}
 .x-list-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.x-mini{border:1px solid var(--line);border-radius:999px;padding:6px 9px;font-size:11px;color:var(--muted)}.x-mini strong{color:#fff}.x-list-actions{display:flex;justify-content:flex-end;margin-top:14px}.x-detail{border:0;background:transparent;color:var(--accent);cursor:pointer;padding:4px 0;font-weight:800}
 .x-rise{color:var(--high)}.x-fall{color:var(--danger)}.x-flat{color:var(--muted)}.x-rank-chart{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}.x-rank-chart .spark-line{stroke:var(--accent)}.x-rank-chart .spark-fill{fill:rgba(102,179,255,.08)}
+@media(max-width:620px){.x-group-head{align-items:flex-start;flex-direction:column;gap:3px}.x-group-note{text-align:left}}
 </style>
 </head>
 <body>
@@ -67,42 +69,62 @@ document.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>{view=b.datase
 async function load(){gate.classList.add("hidden");empty.classList.add("hidden");const cutoff=new Date(Date.now()-24*3600*1000).toISOString();const q=await sb.from("trend_topics").select("id,title,cluster_key,cluster_label,cluster_trend_score,early_signal_score,early_signal_level,velocity_1h,cluster_source_count,cluster_google_score,cluster_news_score,cluster_youtube_score,propagation_path,last_seen_at").gte("last_seen_at",cutoff).order("cluster_trend_score",{ascending:false});if(q.error){gate.classList.remove("hidden");cards.innerHTML="";$("#count").textContent="";return}const topics=q.data||[];const ids=topics.map(x=>x.id);let evidence=[],signals=[],rels=[];const xq=await sb.from("x_trend_snapshots").select("trend_name,rank,tweet_count,observed_at").gte("observed_at",cutoff).order("observed_at",{ascending:true});xRows=xq.error?[]:(xq.data||[]);if(ids.length){const [e,s,r]=await Promise.all([sb.from("topic_evidence").select("topic_id,source_trust_score,evidence_score,evidence_level,source_count,google_count,news_count,youtube_count,youtube_max_views,youtube_max_views_per_hour,reference_items,evaluated_at").in("topic_id",ids),sb.from("external_signals").select("matched_topic_id,source,title,url,score,metric_value,published_at,raw_data,observed_at").in("matched_topic_id",ids).gte("observed_at",cutoff),sb.from("relevance_results").select("topic_id,relevance_domain,category_key,relevance_level,relevance_score,matched_terms").eq("subject_type","topic").in("topic_id",ids)]);if(e.error||s.error){gate.classList.remove("hidden");return}evidence=e.data||[];signals=s.data||[];rels=r.data||[]}const evById=new Map(evidence.map(e=>[e.topic_id,e])),sigById=new Map(),relById=new Map();for(const s of signals){const a=sigById.get(s.matched_topic_id)||[];a.push(s);sigById.set(s.matched_topic_id,a)}for(const r of rels){const a=relById.get(r.topic_id)||[];a.push(r);relById.set(r.topic_id,a)}const byCluster=new Map();for(const t of topics){const k=t.cluster_key||("topic:"+t.id),cur=byCluster.get(k),rank=(Number(t.early_signal_score)||0)*2+(Number(t.cluster_trend_score)||0);if(!cur||rank>cur._rank)byCluster.set(k,{...t,_rank:rank})}all=[...byCluster.values()].map(t=>({topic:t,sourceEvidence:evById.get(t.id)||null,externalSignals:sigById.get(t.id)||[],relevance:relById.get(t.id)||[]}));$("#updated").textContent="更新 "+new Date().toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"});render()}
 function esc(s=""){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}function fmt(n){if(n==null)return"—";const v=Number(n);return Number.isFinite(v)?Math.round(v):"—"}function compact(n){const v=Number(n||0);if(v>=1000000)return (v/1000000).toFixed(v>=10000000?0:1)+"M";if(v>=1000)return (v/1000).toFixed(v>=10000?0:1)+"K";return String(Math.round(v))}function safeUrl(u){try{const x=new URL(u);return ["http:","https:"].includes(x.protocol)?x.href:"#"}catch{return"#"}}function sourceTag(type){const map={wire:"通信社",newspaper:"新聞",broadcast:"ラテ",specialist:"専門",press_release:"PR",aggregator:"集約",web_media:"Web",video:"YouTube",news:"News"};const key=map[type]?type:(type==="youtube"?"video":"news");return {key,label:map[key]||"News"}}
 function normalizeXTrendName(s=""){return String(s).normalize("NFKC").toLowerCase().trim().replace(/^[#＃]+/,"").replace(/[\s　]+/g,"").replace(/[‐‑‒–—―ー]/g,"-")}
-function buildXSignalRows(){const byName=new Map();for(const r of xRows){const raw=String(r.trend_name||"").trim(),k=normalizeXTrendName(raw);if(!k)continue;const a=byName.get(k)||[];a.push(r);byName.set(k,a)}const out=[];for(const [normalized,rows] of byName){rows.sort((a,b)=>new Date(a.observed_at)-new Date(b.observed_at));const first=rows[0],latest=rows[rows.length-1],best=rows.reduce((a,b)=>Number(b.rank)<Number(a.rank)?b:a,first);const delta=Number(first.rank)-Number(latest.rank);out.push({name:String(latest.trend_name||first.trend_name||normalized).trim(),normalized,firstRank:Number(first.rank),rank:Number(latest.rank),bestRank:Number(best.rank),observations:rows.length,delta,lastSeen:latest.observed_at,history:rows})}return out.sort((a,b)=>a.rank-b.rank||b.delta-a.delta)}
+function buildXSignalRows(){
+ const valid=xRows.map(r=>({...r,_normalized:normalizeXTrendName(String(r.trend_name||"").trim()),_observedMs:new Date(r.observed_at).getTime()})).filter(r=>r._normalized&&Number.isFinite(r._observedMs)&&Number(r.rank)>0);
+ if(!valid.length)return {current:[],outside:[],total:0};
+ const batchTimes=[...new Set(valid.map(r=>r._observedMs))].sort((a,b)=>a-b),latestObservedMs=batchTimes[batchTimes.length-1];
+ const byName=new Map();
+ for(const r of valid){const byObserved=byName.get(r._normalized)||new Map(),existing=byObserved.get(r._observedMs);if(!existing||Number(r.rank)<Number(existing.rank))byObserved.set(r._observedMs,r);byName.set(r._normalized,byObserved)}
+ const latestNames=new Set(valid.filter(r=>r._observedMs===latestObservedMs).map(r=>r._normalized)),allRows=[];
+ for(const [normalized,byObserved] of byName){
+  const rows=[...byObserved.values()].sort((a,b)=>a._observedMs-b._observedMs),first=rows[0],last=rows[rows.length-1],current=byObserved.get(latestObservedMs)||null;
+  const best=rows.reduce((a,b)=>Number(b.rank)<Number(a.rank)?b:a,first),observations=byObserved.size;
+  allRows.push({name:String(last.trend_name||first.trend_name||normalized).trim(),normalized,isCurrent:latestNames.has(normalized),firstRank:Number(first.rank),rank:current?Number(current.rank):null,lastRank:Number(last.rank),bestRank:Number(best.rank),observations,delta:observations>1?Number(first.rank)-Number(current?current.rank:last.rank):null,lastSeen:last.observed_at,lastSeenMs:last._observedMs,history:batchTimes.map(observedMs=>byObserved.get(observedMs)||{observed_at:new Date(observedMs).toISOString(),rank:null,missing:true})})
+ }
+ const current=allRows.filter(r=>r.isCurrent).sort((a,b)=>a.rank-b.rank);
+ const outside=allRows.filter(r=>!r.isCurrent).sort((a,b)=>b.lastSeenMs-a.lastSeenMs||a.bestRank-b.bestRank);
+ return {current,outside,total:allRows.length}
+}
+function elapsedSince(iso){const ms=Math.max(0,Date.now()-new Date(iso).getTime()),minutes=Math.floor(ms/60000);if(minutes<1)return"たった今";if(minutes<60)return minutes+"分前";const hours=Math.floor(minutes/60);return hours+"時間前"}
 function renderXSignals(){
- const rows=buildXSignalRows();
- $("#count").textContent=rows.length+"件 / X Trends 直近24時間";
- cards.innerHTML=rows.map((r,i)=>{
-  const dir=r.delta>0?'<span class="x-rise">↑ '+r.delta+'位</span>':r.delta<0?'<span class="x-fall">↓ '+Math.abs(r.delta)+'位</span>':'<span class="x-flat">→</span>';
+ const groups=buildXSignalRows(),rows=[...groups.current,...groups.outside];
+ $("#count").textContent="現在 "+groups.current.length+"件 / 24時間履歴 "+groups.total+"件";
+ const currentHtml=groups.current.map((r,i)=>{
+  const dir=r.delta==null?'<span class="x-flat">比較なし</span>':r.delta>0?'<span class="x-rise">↑ '+r.delta+'位</span>':r.delta<0?'<span class="x-fall">↓ '+Math.abs(r.delta)+'位</span>':'<span class="x-flat">→</span>';
   const fresh=r.observations===1?"初登場":"継続";
   return '<article class="x-list-card"><div class="x-list-head"><div class="x-list-title">'+esc(r.name)+'</div><div class="x-rank-pill">#'+r.rank+'</div></div><div class="x-list-meta"><span class="x-mini">24時間変化 <strong>'+dir+'</strong></span><span class="x-mini">最高 <strong>#'+r.bestRank+'</strong></span><span class="x-mini">'+fresh+' <strong>'+r.observations+'回</strong></span></div><div class="x-list-actions"><button class="x-detail" data-xi="'+i+'">詳細</button></div></article>';
- }).join("");
+ }).join(""),outsideHtml=groups.outside.map((r,i)=>'<article class="x-list-card"><div class="x-list-head"><div class="x-list-title">'+esc(r.name)+'</div><div class="x-rank-pill">圏外</div></div><div class="x-list-meta"><span class="x-mini">最終観測 <strong>#'+r.lastRank+'</strong></span><span class="x-mini">最高 <strong>#'+r.bestRank+'</strong></span><span class="x-mini"><strong>'+r.observations+'回</strong>観測</span><span class="x-mini">最終観測 <strong>'+esc(elapsedSince(r.lastSeen))+'</strong></span></div><div class="x-list-actions"><button class="x-detail" data-xi="'+(groups.current.length+i)+'">詳細</button></div></article>').join("");
+ cards.innerHTML='<div class="x-group-head"><div class="x-group-title">現在のTop 20</div><div class="x-group-note">最新観測時点の順位</div></div>'+currentHtml+'<div class="x-group-head"><div class="x-group-title">24時間以内に圏外</div><div class="x-group-note">最終観測が新しい順</div></div>'+(outsideHtml||'<div class="x-group-empty">直近24時間に圏外となったトレンドはありません。</div>');
  empty.classList.toggle("hidden",rows.length!==0);
  cards.querySelectorAll(".x-detail").forEach(b=>b.onclick=()=>openXRow(rows[Number(b.dataset.xi)]));
 }
 function xRankSparkline(rows){
   if(!rows?.length)return '<div class="x-empty">順位履歴がまだありません。</div>';
-  if(rows.length===1)return '<div class="x-empty">初回観測です。次回以降に推移を表示します。</div>';
-  const vals=rows.map(r=>Number(r.rank||0)).filter(v=>v>0),w=620,h=130,p=12,min=Math.min(...vals),max=Math.max(...vals),span=Math.max(1,max-min);
-  const pts=rows.map((r,i)=>{const v=Number(r.rank||max),x=p+(w-2*p)*(i/(rows.length-1)),y=p+(h-2*p)*((v-min)/span);return [x,y]});
-  const line=pts.map((pt,i)=>(i?"L":"M")+pt[0].toFixed(1)+" "+pt[1].toFixed(1)).join(" ");
-  const fill=line+" L "+pts[pts.length-1][0].toFixed(1)+" "+(h-p)+" L "+pts[0][0].toFixed(1)+" "+(h-p)+" Z";
-  return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none" aria-label="X順位推移"><line class="spark-grid" x1="12" y1="32" x2="608" y2="32"/><line class="spark-grid" x1="12" y1="65" x2="608" y2="65"/><line class="spark-grid" x1="12" y1="98" x2="608" y2="98"/><path class="spark-fill" d="'+fill+'"/><path class="spark-line" d="'+line+'"/></svg><div class="chart-note">上に行くほど上位（#1が最上位）</div>';
+  const vals=rows.map(r=>Number(r.rank)).filter(v=>Number.isFinite(v)&&v>0);
+  const outsideNow=!Number.isFinite(Number(rows[rows.length-1]?.rank))||Number(rows[rows.length-1]?.rank)<=0;
+  if(vals.length===1)return '<div class="x-empty">初回観測です。次回以降に推移を表示します。'+(outsideNow?' 最新観測時点はTop20圏外です。':'')+'</div>';
+  const w=620,h=130,p=12,min=Math.min(...vals),max=Math.max(...vals),span=Math.max(1,max-min),denom=Math.max(1,rows.length-1);
+  const pts=rows.map((r,i)=>{const v=Number(r.rank);if(!Number.isFinite(v)||v<=0)return null;const x=p+(w-2*p)*(i/denom),y=p+(h-2*p)*((v-min)/span);return [x,y]});
+  const segments=[];let current=[];
+  for(const pt of pts){if(pt){current.push(pt)}else if(current.length){segments.push(current);current=[]}}if(current.length)segments.push(current);
+  const marks=segments.map(segment=>segment.length===1?'<circle cx="'+segment[0][0].toFixed(1)+'" cy="'+segment[0][1].toFixed(1)+'" r="4" fill="#66b3ff"/>':'<path class="spark-line" d="'+segment.map((pt,i)=>(i?"L":"M")+pt[0].toFixed(1)+" "+pt[1].toFixed(1)).join(" ")+'"/>').join("");
+  return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none" aria-label="X順位推移"><line class="spark-grid" x1="12" y1="32" x2="608" y2="32"/><line class="spark-grid" x1="12" y1="65" x2="608" y2="65"/><line class="spark-grid" x1="12" y1="98" x2="608" y2="98"/>'+marks+'</svg><div class="chart-note">上に行くほど上位（#1が最上位）。圏外期間は線を接続しません。'+(outsideNow?' 最新観測時点はTop20圏外です。':'')+'</div>';
 }
 function openXRow(r){
- const direction=r.delta>0?"↑ "+r.delta+"位":r.delta<0?"↓ "+Math.abs(r.delta)+"位":"→ 変化なし";
+ const direction=r.delta==null?"比較なし":r.delta>0?"↑ "+r.delta+"位":r.delta<0?"↓ "+Math.abs(r.delta)+"位":"→ 変化なし";
  const q=xSearchQuery(r.name),href=xSearchHref(r.name),googleHref=googleSearchHref(r.name);
  $("#mTitle").textContent=r.name;
  $("#mBody").innerHTML=`<div class="detail-hero">
   <div class="detail-summary">
-   <span class="summary-chip">現在 <strong>#${r.rank}</strong></span>
+   ${r.isCurrent?`<span class="summary-chip">現在 <strong>#${r.rank}</strong></span>`:`<span class="summary-chip">最新Top20 <strong>圏外</strong></span><span class="summary-chip">最終観測 <strong>#${r.lastRank}</strong></span>`}
    <span class="summary-chip">最高 <strong>#${r.bestRank}</strong></span>
-   <span class="summary-chip">24時間 <strong>${esc(direction)}</strong></span>
+   ${r.isCurrent?`<span class="summary-chip">24時間 <strong>${esc(direction)}</strong></span>`:`<span class="summary-chip">最終観測 <strong>${esc(elapsedSince(r.lastSeen))}</strong></span>`}
   </div>
  </div>
  <div class="section"><div class="section-title">X SIGNAL 詳細</div><div class="x-card">
   <div class="kv" style="margin-top:0">
    <div class="k">初回順位</div><div>#${r.firstRank}</div>
-   <div class="k">現在順位</div><div>#${r.rank}</div>
+   ${r.isCurrent?`<div class="k">現在順位</div><div>#${r.rank}</div>`:`<div class="k">最終観測順位</div><div>#${r.lastRank}</div><div class="k">最終観測</div><div>${esc(elapsedSince(r.lastSeen))}</div>`}
    <div class="k">最高順位</div><div>#${r.bestRank}</div>
    <div class="k">観測回数</div><div>${r.observations}回</div>
    <div class="k">状態</div><div>${r.observations===1?"初登場":"継続観測"}</div>
