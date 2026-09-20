@@ -1,0 +1,2 @@
+[functions.run-quality-check]
+verify_jwt = true
