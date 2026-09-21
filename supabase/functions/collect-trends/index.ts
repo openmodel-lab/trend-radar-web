@@ -223,90 +223,6 @@ async function rescore(){
 
 const RELEVANCE_WINDOW_HOURS=24;
 function relNorm(s:string){return (s||"").normalize("NFKC").toLowerCase().replace(/\s+/g," ").trim()}
-function relHas(text:string,term:string){
- const x=relNorm(text),t=relNorm(term);if(!t)return false;
- if(t.length===1)return x===t;
- let from=0;
- while(true){
-  const i=x.indexOf(t,from);if(i<0)return false;
-  const before=i>0?x[i-1]:"",after=i+t.length<x.length?x[i+t.length]:"";
-  const ascii=/[a-z0-9]/i,katakana=/[ァ-ヶー]/;
-  const asciiTerm=/^[a-z0-9.+#-]+$/i.test(t),katakanaTerm=/^[ァ-ヶー]+$/.test(t);
-  if(asciiTerm){
-   if(!ascii.test(before)&&!ascii.test(after))return true;
-  }else if(katakanaTerm){
-   if(!ascii.test(before)&&!ascii.test(after)&&!katakana.test(before)&&!katakana.test(after))return true;
-  }else{
-   if(!ascii.test(before)&&!ascii.test(after))return true;
-  }
-  from=i+1;
- }
-}
-function uniq<T>(a:T[]){return [...new Set(a)]}
-function pruneMatches(a:string[]){
- const sorted=uniq(a).sort((x,y)=>relNorm(y).length-relNorm(x).length);
- const kept:string[]=[];
- for(const term of sorted){
-  const n=relNorm(term);
-  if(!kept.some(k=>relNorm(k).includes(n)))kept.push(term);
- }
- return kept;
-}
-function levelFromScore(score:number){return score>=80?"high":score>=60?"medium":score>=40?"low":"none"}
-function evalRelevance(text:string,rules:any[],entities:any[],excludes:any[]){
- const by=new Map<string,any>();
- function put(domain:string,category:string,score:number,ruleIds:number[]=[],terms:string[]=[],entityIds:number[]=[]){
-  if(!category||score<=0)return;
-  const k=domain+"|"+category,old=by.get(k)||{relevance_domain:domain,category_key:category,relevance_score:0,matched_rule_ids:[],matched_terms:[],matched_entity_ids:[]};
-  old.relevance_score=Math.max(old.relevance_score,score);
-  old.matched_rule_ids=uniq([...old.matched_rule_ids,...ruleIds]);
-  old.matched_terms=uniq([...old.matched_terms,...terms]);
-  old.matched_entity_ids=uniq([...old.matched_entity_ids,...entityIds]);
-  by.set(k,old);
- }
- for(const e of entities||[]){
-  if(e.enabled!==false&&relHas(text,e.entity_value))put(e.relevance_domain,e.category_key,100,[],[e.entity_value],[e.id]);
- }
- for(const r of rules||[]){
-  if(r.enabled===false||!r.category_key)continue;
-  const blocked=(excludes||[]).some((e:any)=>e.enabled!==false&&e.relevance_domain===r.relevance_domain&&e.category_key===r.category_key&&(e.match_terms||[]).some((t:string)=>relHas(text,t)));
-  if(blocked)continue;
-  const matches=pruneMatches((r.match_terms||[]).filter((t:string)=>relHas(text,t)));
-  const strongNorm=new Set((r.strong_terms||[]).map((t:string)=>relNorm(t)));
-  const strong=matches.filter((t:string)=>strongNorm.has(relNorm(t)));
-  let score=0;
-  if(strong.length>=2)score=85;
-  else if(matches.length>=2)score=65;
-  else if(matches.length===1)score=40;
-  if(score>0)put(r.relevance_domain,r.category_key,score,[r.id],matches,[]);
- }
- return [...by.values()].map(x=>({...x,relevance_level:levelFromScore(x.relevance_score)}));
-}
-async function relevance(){
- const cutoff=new Date(Date.now()-RELEVANCE_WINDOW_HOURS*60*60*1000).toISOString();
- const allRules=await rest("watch_rules?select=id,rule_type,value,relevance_domain,category_key,match_terms,strong_terms,enabled&enabled=eq.true",{method:"GET"});
- const rules=(allRules||[]).filter((r:any)=>r.rule_type==="industry");
- const excludes=(allRules||[]).filter((r:any)=>r.rule_type==="exclude");
- const entities=await rest("relevance_entities?select=id,relevance_domain,category_key,entity_value,relevance_level,enabled&enabled=eq.true",{method:"GET"});
- const topics=await rest(`trend_topics?select=id,title,cluster_key,cluster_label,last_seen_at&last_seen_at=gte.${encodeURIComponent(cutoff)}&order=last_seen_at.desc`,{method:"GET"});
- await rest("relevance_results?id=gt.0",{method:"DELETE",headers:{Prefer:"return=minimal"}});
- const rows:any[]=[];
- const groups=new Map<string,any[]>();
- for(const t of topics||[]){
-  const hits=evalRelevance(t.title||"",rules||[],entities||[],excludes||[]);
-  for(const h of hits)rows.push({subject_type:"topic",topic_id:t.id,cluster_key:null,...h,evidence:{title:t.title,window_hours:RELEVANCE_WINDOW_HOURS},evaluated_at:new Date().toISOString()});
-  if(t.cluster_key){const a=groups.get(t.cluster_key)||[];a.push(t);groups.set(t.cluster_key,a)}
- }
- for(const [clusterKey,members] of groups){
-  const combined=members.map(x=>x.title||"").join("\n");
-  const hits=evalRelevance(combined,rules||[],entities||[],excludes||[]);
-  for(const h of hits)rows.push({subject_type:"cluster",topic_id:null,cluster_key:clusterKey,...h,evidence:{cluster_label:members[0]?.cluster_label||clusterKey,member_count:members.length,sample_titles:members.slice(0,5).map(x=>x.title),window_hours:RELEVANCE_WINDOW_HOURS},evaluated_at:new Date().toISOString()});
- }
- if(rows.length)await rest("relevance_results",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(rows)});
- return{topics:(topics||[]).length,clusters:groups.size,results:rows.length,window_hours:RELEVANCE_WINDOW_HOURS}
-}
-
-
 function evidenceLevel(score:number){return score>=75?"strong":score>=50?"good":score>=30?"watch":"light"}
 function youtubeMomentum(vph:number){return vph>=50000?25:vph>=10000?20:vph>=3000?15:vph>=1000?10:vph>=300?5:0}
 async function evidence(){
@@ -316,7 +232,7 @@ async function evidence(){
   rest("source_profiles?select=source_name,source_type,base_trust,specialties,first_party,enabled&enabled=eq.true",{method:"GET"}),
   rest(`trend_topics?select=id,title,last_seen_at&last_seen_at=gte.${encodeURIComponent(cutoff)}`,{method:"GET"})
  ]);
- const profileMap=new Map((profiles||[]).map((p:any)=>[relNorm(p.source_name),p]));
+ const profileMap=new Map<string,any>((profiles||[]).map((p:any)=>[relNorm(p.source_name),p]));
  const topicMap=new Map((topics||[]).map((t:any)=>[t.id,t]));
  const byTopic=new Map<number,any[]>();
  const scoringSources=new Set(["google","news","youtube"]);
@@ -389,4 +305,4 @@ async function authorizedCronRequest(req:Request){
   return hex===CRON_TOKEN_SHA256;
 }
 
-Deno.serve(async req=>{if(req.method!=="POST")return new Response("POST only",{status:405});if(!(await authorizedCronRequest(req)))return new Response("Forbidden",{status:403});const results=[await run("google",trends),await run("news",news),await run("youtube",youtube)];const rescored=await rescore();let evidenceResult:any;try{const e=await evidence();evidenceResult={status:"success",...e};}catch(e){evidenceResult={status:"error",error:String(e)};}let relevanceResult:any;try{const r=await relevance();relevanceResult={status:"success",...r};await rest("collector_runs",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({source:"relevance",status:"success",finished_at:new Date().toISOString(),items_fetched:r.results,metadata:{window_hours:r.window_hours,topics:r.topics,clusters:r.clusters}})});}catch(e){relevanceResult={status:"error",error:String(e)};await rest("collector_runs",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({source:"relevance",status:"error",finished_at:new Date().toISOString(),items_fetched:0,error_message:String(e),metadata:{window_hours:RELEVANCE_WINDOW_HOURS}})}).catch(()=>{});}return Response.json({ok:results.some(x=>x.status==="success"),results,rescored,evidence:evidenceResult,relevance:relevanceResult,at:new Date().toISOString()})});
+Deno.serve(async req=>{if(req.method!=="POST")return new Response("POST only",{status:405});if(!(await authorizedCronRequest(req)))return new Response("Forbidden",{status:403});const results=[await run("google",trends),await run("news",news),await run("youtube",youtube)];const rescored=await rescore();let evidenceResult:any;try{const e=await evidence();evidenceResult={status:"success",...e};}catch(e){evidenceResult={status:"error",error:String(e)};}return Response.json({ok:results.some(x=>x.status==="success"),results,rescored,evidence:evidenceResult,relevance:{status:"deferred",function:"update-relevance"},at:new Date().toISOString()})});
