@@ -40,6 +40,23 @@ export type GeminiResult = {
   confidence: number;
 };
 
+export type WorkCandidate = {
+  topic_id: string;
+  input_hash: string;
+  last_seen_at: string;
+};
+
+export type WorkSelection<T extends WorkCandidate> = {
+  selected: T[];
+  remaining: number;
+  reusable: number;
+};
+
+export type WorkProgress = {
+  remaining: number;
+  has_more: boolean;
+};
+
 const secretPatterns = [
   /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
   /\b(?:api[_-]?key|secret|token|password|credential)\s*[:=]\s*\S+/gi,
@@ -124,6 +141,72 @@ export function chunk<T>(values: T[], size: number): T[][] {
     chunks.push(values.slice(index, index + size));
   }
   return chunks;
+}
+
+export function selectQualityWork<T extends WorkCandidate>(
+  candidates: T[],
+  successfulKeys: ReadonlySet<string>,
+  successfulTopicIds: ReadonlySet<string>,
+  attemptedKeys: ReadonlySet<string>,
+  lastSuccessfulAtByTopic: ReadonlyMap<string, string>,
+  limit: number,
+): WorkSelection<T> {
+  const reusable =
+    candidates.filter((candidate) =>
+      successfulKeys.has(workKey(candidate.topic_id, candidate.input_hash))
+    ).length;
+  const pending = candidates.filter((candidate) =>
+    !successfulKeys.has(workKey(candidate.topic_id, candidate.input_hash))
+  );
+
+  pending.sort((left, right) => {
+    const priority = candidatePriority(left) - candidatePriority(right);
+    if (priority !== 0) return priority;
+    if (candidatePriority(left) === 1) {
+      const oldestSuccess = Date.parse(
+        lastSuccessfulAtByTopic.get(left.topic_id) ?? "1970-01-01T00:00:00Z",
+      ) - Date.parse(
+        lastSuccessfulAtByTopic.get(right.topic_id) ?? "1970-01-01T00:00:00Z",
+      );
+      if (oldestSuccess !== 0) return oldestSuccess;
+    }
+    const recency = Date.parse(right.last_seen_at) -
+      Date.parse(left.last_seen_at);
+    if (recency !== 0) return recency;
+    return left.topic_id.localeCompare(right.topic_id, "en", { numeric: true });
+  });
+
+  const selected = pending.slice(0, Math.max(0, Math.trunc(limit)));
+  return { selected, remaining: pending.length - selected.length, reusable };
+
+  function candidatePriority(candidate: T): number {
+    const key = workKey(candidate.topic_id, candidate.input_hash);
+    if (
+      !successfulTopicIds.has(candidate.topic_id) && !attemptedKeys.has(key)
+    ) {
+      return 0;
+    }
+    if (successfulTopicIds.has(candidate.topic_id)) return 1;
+    return 2;
+  }
+}
+
+export function summarizeWorkProgress(
+  queuedRemaining: number,
+  deferredByDeadline: number,
+  unstarted: number,
+  failed: number,
+): WorkProgress {
+  const remaining = Math.max(
+    0,
+    Math.trunc(queuedRemaining) + Math.trunc(deferredByDeadline) +
+      Math.trunc(unstarted) + Math.trunc(failed),
+  );
+  return { remaining, has_more: remaining > 0 };
+}
+
+function workKey(topicId: string, inputHash: string): string {
+  return `${topicId}:${inputHash}`;
 }
 
 export const RESPONSE_JSON_SCHEMA = {

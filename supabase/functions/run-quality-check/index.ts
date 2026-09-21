@@ -11,7 +11,9 @@ import {
   RESPONSE_JSON_SCHEMA,
   sanitizeText,
   sanitizeTitles,
+  selectQualityWork,
   type SourceName,
+  summarizeWorkProgress,
   type TopicInput,
   validateGeminiResults,
 } from "./quality.ts";
@@ -37,6 +39,9 @@ type ObservationRow = {
 type PreparedTopic = {
   input: TopicInput;
   hash: string;
+  topic_id: string;
+  input_hash: string;
+  last_seen_at: string;
 };
 
 type AdminClient = ReturnType<typeof createClient<any>>;
@@ -54,6 +59,10 @@ const SYSTEM_INSTRUCTION = `あなたはTrend Radarのデータ品質チェッ�
 qualityは「正常」「ノイズ」「曖昧」「表示名補正」「重複候補」「判定不能」のいずれかです。
 suggested_nameが不要な場合は空文字にしてください。
 hide_candidateとsuggested_nameはshadow modeの参考情報であり、自動反映されません。`;
+
+const TIME_BUDGET_MS = 110_000;
+const MIN_BATCH_START_MS = 10_000;
+const ACTIVE_RUN_WINDOW_MS = 15 * 60 * 1000;
 
 Deno.serve(async (request: Request) => {
   if (request.method !== "POST") {
@@ -83,11 +92,33 @@ Deno.serve(async (request: Request) => {
   const supabase: AdminClient = createClient<any>(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  const startedAt = Date.now();
+  const deadline = startedAt + TIME_BUDGET_MS;
   const windowEnd = new Date();
   const windowStart = new Date(windowEnd.getTime() - 24 * 60 * 60 * 1000);
   let runId: string | null = null;
 
   try {
+    const activeRunCutoff = new Date(startedAt - ACTIVE_RUN_WINDOW_MS)
+      .toISOString();
+    const { data: activeRuns, error: activeRunError } = await supabase
+      .from("quality_check_runs")
+      .select("id")
+      .eq("status", "running")
+      .gte("started_at", activeRunCutoff)
+      .limit(1);
+    if (activeRunError) {
+      throw new Error(
+        `active_run_check_failed:${safeError(activeRunError.message)}`,
+      );
+    }
+    if (activeRuns?.length) {
+      return jsonResponse(
+        { status: "skipped", reason: "already_running" },
+        409,
+      );
+    }
+
     const { data: run, error: runError } = await supabase
       .from("quality_check_runs")
       .insert({
@@ -111,55 +142,24 @@ Deno.serve(async (request: Request) => {
       supabase,
       windowStart.toISOString(),
     );
-    const prepared = options.maxTopics === null
-      ? allPrepared
-      : allPrepared.slice(0, options.maxTopics);
-    await updateRun(supabase, activeRunId, { topic_count: prepared.length });
+    const history = await loadResultHistory(supabase);
+    const selection = selectQualityWork(
+      allPrepared,
+      history.successfulKeys,
+      history.successfulTopicIds,
+      history.attemptedKeys,
+      history.lastSuccessfulAtByTopic,
+      options.maxTopics,
+    );
+    const pending = Date.now() + MIN_BATCH_START_MS < deadline
+      ? selection.selected
+      : [];
+    const deferredByDeadline = selection.selected.length - pending.length;
+    await updateRun(supabase, activeRunId, { topic_count: pending.length });
 
-    const cached = await loadCachedResults(supabase);
-    const reusable: Array<Record<string, unknown>> = [];
-    const pending: PreparedTopic[] = [];
-
-    for (const topic of prepared) {
-      const cacheKey = `${topic.input.topic_id}:${topic.hash}`;
-      const previous = cached.get(cacheKey);
-      if (!previous) {
-        pending.push(topic);
-        continue;
-      }
-      reusable.push({
-        run_id: activeRunId,
-        batch_id: crypto.randomUUID(),
-        topic_id: topic.input.topic_id,
-        topic_name: topic.input.topic_name,
-        cluster_key: topic.input.cluster_key,
-        cluster_label: topic.input.cluster_label,
-        quality: previous.quality,
-        reason: previous.reason,
-        suggested_name: previous.suggested_name ?? "",
-        hide_candidate: previous.hide_candidate,
-        confidence: previous.confidence,
-        status: "reused",
-        model: MODEL,
-        prompt_version: PROMPT_VERSION,
-        input_schema_version: INPUT_SCHEMA_VERSION,
-        input_hash: topic.hash,
-        source_snapshot: topic.input,
-        reused_from_id: previous.reused_from_id ?? previous.id,
-      });
-    }
-
-    if (reusable.length) {
-      const { error } = await supabase.from("quality_check_results").insert(
-        reusable,
-      );
-      if (error) {
-        throw new Error(`reuse_insert_failed:${safeError(error.message)}`);
-      }
-    }
-
-    let succeededCount = reusable.length;
+    let succeededCount = 0;
     let failedCount = 0;
+    let unstartedCount = pending.length;
     let geminiCallCount = 0;
     const usage: GeminiUsage = {
       prompt_tokens: 0,
@@ -167,6 +167,8 @@ Deno.serve(async (request: Request) => {
       total_tokens: 0,
     };
     for (const batch of chunk(pending, BATCH_SIZE)) {
+      if (Date.now() + MIN_BATCH_START_MS >= deadline) break;
+      unstartedCount -= batch.length;
       const outcome = await processBatch(
         supabase,
         geminiApiKey,
@@ -174,6 +176,7 @@ Deno.serve(async (request: Request) => {
         batch,
         windowStart,
         windowEnd,
+        deadline,
       );
       succeededCount += outcome.succeeded;
       failedCount += outcome.failed;
@@ -184,7 +187,9 @@ Deno.serve(async (request: Request) => {
       await updateRun(supabase, activeRunId, {
         processed_count: succeededCount,
         failed_count: failedCount,
-        reused_count: reusable.length,
+        // Number of current inputs skipped because an identical successful
+        // result already exists. No duplicate reused result row is inserted.
+        reused_count: selection.reusable,
       });
     }
 
@@ -193,19 +198,32 @@ Deno.serve(async (request: Request) => {
       : succeededCount > 0
       ? "partial"
       : "failed";
+    const progress = summarizeWorkProgress(
+      selection.remaining,
+      deferredByDeadline,
+      unstartedCount,
+      failedCount,
+    );
     await updateRun(supabase, activeRunId, {
       status,
       processed_count: succeededCount,
       failed_count: failedCount,
-      reused_count: reusable.length,
+      reused_count: selection.reusable,
       finished_at: new Date().toISOString(),
     });
     return jsonResponse({
       run_id: runId,
       status,
       processed: succeededCount,
+      succeeded: succeededCount,
       failed: failedCount,
-      reused: reusable.length,
+      // Existing successful results reused during selection; these topics were
+      // excluded before applying the per-run limit and were not written again.
+      reused: selection.reusable,
+      selected: pending.length,
+      remaining: progress.remaining,
+      has_more: progress.has_more,
+      time_budget_ms: TIME_BUDGET_MS,
       gemini_calls: geminiCallCount,
       gemini_usage: usage,
     });
@@ -287,7 +305,14 @@ async function loadPreparedTopics(
         youtube: sanitizeTitles(titles.youtube),
       },
     });
-    return { input, hash: await inputHash(input) };
+    const hash = await inputHash(input);
+    return {
+      input,
+      hash,
+      topic_id: input.topic_id,
+      input_hash: hash,
+      last_seen_at: input.last_seen_at,
+    };
   }));
 }
 
@@ -304,27 +329,47 @@ function normalizeSource(source: string): SourceName | null {
   return null;
 }
 
-async function loadCachedResults(
+async function loadResultHistory(
   supabase: AdminClient,
-): Promise<Map<string, Record<string, unknown>>> {
+): Promise<{
+  successfulKeys: Set<string>;
+  successfulTopicIds: Set<string>;
+  attemptedKeys: Set<string>;
+  lastSuccessfulAtByTopic: Map<string, string>;
+}> {
   const { data, error } = await supabase
     .from("quality_check_results")
-    .select(
-      "id,topic_id,input_hash,quality,reason,suggested_name,hide_candidate,confidence,reused_from_id,checked_at",
-    )
+    .select("topic_id,input_hash,status,checked_at")
     .eq("model", MODEL)
     .eq("prompt_version", PROMPT_VERSION)
     .eq("input_schema_version", INPUT_SCHEMA_VERSION)
-    .in("status", ["succeeded", "reused"])
     .order("checked_at", { ascending: false })
     .limit(10000);
-  if (error) throw new Error(`cache_select_failed:${safeError(error.message)}`);
-  const cache = new Map<string, Record<string, unknown>>();
+  if (error) {
+    throw new Error(`history_select_failed:${safeError(error.message)}`);
+  }
+  const successfulKeys = new Set<string>();
+  const successfulTopicIds = new Set<string>();
+  const attemptedKeys = new Set<string>();
+  const lastSuccessfulAtByTopic = new Map<string, string>();
   for (const row of (data ?? []) as Array<Record<string, unknown>>) {
     const key = `${row.topic_id}:${row.input_hash}`;
-    if (!cache.has(key)) cache.set(key, row);
+    attemptedKeys.add(key);
+    if (row.status === "succeeded" || row.status === "reused") {
+      successfulKeys.add(key);
+      const topicId = String(row.topic_id);
+      successfulTopicIds.add(topicId);
+      if (!lastSuccessfulAtByTopic.has(topicId)) {
+        lastSuccessfulAtByTopic.set(topicId, String(row.checked_at));
+      }
+    }
   }
-  return cache;
+  return {
+    successfulKeys,
+    successfulTopicIds,
+    attemptedKeys,
+    lastSuccessfulAtByTopic,
+  };
 }
 
 async function processBatch(
@@ -334,6 +379,7 @@ async function processBatch(
   batch: PreparedTopic[],
   windowStart: Date,
   windowEnd: Date,
+  deadline: number,
 ): Promise<{
   succeeded: number;
   failed: number;
@@ -348,6 +394,7 @@ async function processBatch(
       batch.map((topic) => topic.input),
       windowStart,
       windowEnd,
+      deadline,
     );
     apiCalls = response.attempts;
     const parsed = JSON.parse(response.text);
@@ -455,6 +502,7 @@ async function callGemini(
   topics: TopicInput[],
   windowStart: Date,
   windowEnd: Date,
+  deadline: number,
 ): Promise<{
   text: string;
   attempts: number;
@@ -486,11 +534,27 @@ async function callGemini(
   };
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify(body),
-    });
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < 5_000) {
+      throw new GeminiCallError("time_budget_exhausted", attempt);
+    }
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(Math.min(30_000, remainingMs - 2_000)),
+      });
+    } catch {
+      if (attempt === 2 || deadline - Date.now() < 7_000) {
+        throw new GeminiCallError("gemini_request_failed", attempt + 1);
+      }
+      continue;
+    }
     if (response.ok) {
       const payload = await response.json();
       const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -536,9 +600,9 @@ function finiteCount(value: unknown): number {
 
 async function requestOptions(
   request: Request,
-): Promise<{ maxTopics: number | null } | { error: string }> {
+): Promise<{ maxTopics: number } | { error: string }> {
   const text = await request.text();
-  if (!text.trim()) return { maxTopics: null };
+  if (!text.trim()) return { maxTopics: BATCH_SIZE };
   let body: unknown;
   try {
     body = JSON.parse(text);
@@ -546,7 +610,7 @@ async function requestOptions(
     return { error: "invalid_json" };
   }
   const value = (body as Record<string, unknown>)?.max_topics;
-  if (value === undefined || value === null) return { maxTopics: null };
+  if (value === undefined || value === null) return { maxTopics: BATCH_SIZE };
   if (
     typeof value !== "number" || !Number.isInteger(value) || value < 1 ||
     value > 20
