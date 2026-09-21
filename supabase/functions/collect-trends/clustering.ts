@@ -266,6 +266,24 @@ function semanticPhraseEligible(value: string) {
   return compact.length >= 3;
 }
 
+export function semanticKeyEligible(key: string) {
+  if (!key || /^topic:\d+$/i.test(key)) return false;
+  if (key.startsWith("event:")) return EVENT_BY_KEY.has(key);
+  if (key.includes(":") && !/^(entity|series):/.test(key)) return false;
+
+  const suffix = key.includes(":") ? key.slice(key.indexOf(":") + 1) : key;
+  const meaning = clusterText(suffix.replace(/_/g, " "));
+  const compact = compactNormalized(meaning);
+  if (!semanticPhraseEligible(meaning)) return false;
+  if (ALIAS_TARGETS.has(meaning)) return true;
+
+  // Eligibility is derived only from the key itself. Unknown short/common terms
+  // have no independent identity signal and therefore remain legacy/UNKNOWN.
+  const identityAnchors = anchors(meaning);
+  const mixedScript = /[a-z0-9]/i.test(compact) && /[一-龯ぁ-んァ-ヶー]/.test(compact);
+  return identityAnchors.length > 0 || mixedScript;
+}
+
 function asymmetricContains(title: string, phrase: string) {
   const titleText = clusterText(title), keyText = clusterText(phrase);
   if (/^[a-z0-9 ]+$/i.test(keyText)) {
@@ -297,10 +315,7 @@ export function reproducibleClusterKeys(candidates: readonly ClusterCandidate[])
   const result = new Set<string>();
   for (const candidate of candidates) {
     const key = String(candidate.cluster_key || "");
-    if (!key || /^topic:\d+$/i.test(key)) continue;
-    if (/^(entity|series):/.test(key) || key.startsWith("event:") && EVENT_BY_KEY.has(key)) {
-      result.add(key);
-    } else if (!key.includes(":") && semanticKeyMatches(candidate.title, key)) result.add(key);
+    if (semanticKeyEligible(key)) result.add(key);
   }
   return result;
 }

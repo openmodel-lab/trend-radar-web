@@ -2,6 +2,7 @@ import {
   matchesEventDefinition,
   priorityEventCluster,
   selectCluster,
+  semanticKeyEligible,
   semanticKeyMatches,
   type ClusterCandidate,
 } from "./clustering.ts";
@@ -57,7 +58,12 @@ Deno.test("9 Takaishi drama cannot enter BE:FIRST", () => {
 });
 
 Deno.test("10 Ghibli Park cannot enter Asian Games", () => {
-  assert(!semanticKeyMatches("ジブリパーク 新エリア", "entity:愛知名古屋アジア大会"), "unrelated topic passed semantic gate");
+  const members = [
+    candidate("愛知・名古屋アジア大会 開幕", "entity:愛知名古屋アジア大会", "愛知名古屋アジア大会"),
+    candidate("ジブリパーク 新エリア", "entity:愛知名古屋アジア大会", "愛知名古屋アジア大会"),
+  ];
+  const result = selectCluster("ジブリパーク 新エリア", members);
+  assert(result.cluster_key !== "entity:愛知名古屋アジア大会", "polluted member revived an unrelated cluster");
 });
 
 Deno.test("11 polluted BE:FIRST members cannot outvote semantic key", () => {
@@ -145,4 +151,31 @@ Deno.test("21 a polluted majority cannot outvote semiconductor event semantics",
   const result = selectCluster(title, members);
   assert(result.cluster_key !== "event:semiconductor_capacity", "polluted majority overrode semantic event gate");
   assert(result.cluster_method === "heuristic_v05", "rejected title did not create a fresh canonical cluster");
+});
+
+Deno.test("22 weak entity key is not eligible by prefix alone", () => {
+  assert(!semanticKeyEligible("entity:ドラマ"), "weak entity key became eligible by prefix");
+  const result = selectCluster("韓国ドラマ 新作", [candidate("ドラマ 最新情報", "entity:ドラマ")]);
+  assert(result.cluster_key !== "entity:ドラマ", "weak entity key grew");
+});
+
+Deno.test("23 weak series key is not eligible by prefix alone", () => {
+  assert(!semanticKeyEligible("series:番組"), "weak series key became eligible by prefix");
+  const result = selectCluster("音楽番組 放送決定", [candidate("番組 最新情報", "series:番組")]);
+  assert(result.cluster_key !== "series:番組", "weak series key grew");
+});
+
+Deno.test("24 ambiguous unprefixed key is not made eligible by one member", () => {
+  const cases: [string, string][] = [
+    ["ドラマ", "韓国ドラマ 新作"],
+    ["番組", "音楽番組 放送決定"],
+    ["大会", "卓球大会 日程"],
+    ["選挙", "知事選挙 最新情勢"],
+    ["事件", "事件 最新情報"],
+  ];
+  for (const [key, title] of cases) {
+    assert(!semanticKeyEligible(key), `${key} became eligible`);
+    const result = selectCluster(title, [candidate(`${key} 最新情報`, key)]);
+    assert(result.cluster_method !== "semantic_key_v01", `one member made ${key} reproducible`);
+  }
 });
