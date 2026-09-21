@@ -1,5 +1,7 @@
 import {
   APPROVED_IDENTITY_KEYS,
+  GENERIC_CLUSTER,
+  STOP,
   matchesEventDefinition,
   priorityEventCluster,
   selectCluster,
@@ -231,13 +233,31 @@ Deno.test("26 approved identity fallback does not admit unapproved generic keys"
 });
 
 Deno.test("27 dictionary presence cannot bypass semanticKeyMatches", () => {
-  const result = selectCluster("高橋一生 主演ドラマ", [candidate("BE:FIRST 新曲", "鳥谷敬")]);
-  assert(result.cluster_key !== "鳥谷敬", "approved identity bypassed the semantic title gate");
+  const cases: [string, string][] = [
+    ["トヨタ", "ホンダ 新型車を発表"],
+    ["ロシア", "ウクライナ情勢 最新情報"],
+    ["池上彰", "選挙特番の視聴率が発表"],
+  ];
+  for (const [key, title] of cases) {
+    const result = selectCluster(title, [candidate(title, key)]);
+    assert(result.cluster_key !== key, `${key} bypassed the semantic title gate`);
+    assert(result.cluster_method !== "semantic_key_v01", `${key} was revived by member similarity or anchors`);
+  }
 });
 
 Deno.test("28 initial approved identity dictionary contains only reviewed entries", () => {
-  assert(APPROVED_IDENTITY_KEYS.size === 64, `unexpected approved identity count: ${APPROVED_IDENTITY_KEYS.size}`);
-  for (const held of ["エホバ", "レアル", "民主党"]) {
+  assert(APPROVED_IDENTITY_KEYS.size === 61, `unexpected approved identity count: ${APPROVED_IDENTITY_KEYS.size}`);
+  for (const held of ["エホバ", "レアル", "民主党", "ハワイ", "北極圏", "天皇杯"]) {
     assert(!APPROVED_IDENTITY_KEYS.has(held), `${held} should remain on hold`);
+  }
+});
+
+Deno.test("29 approved identity dictionary cannot overlap STOP or GENERIC_CLUSTER", () => {
+  for (const key of APPROVED_IDENTITY_KEYS) {
+    assert(!STOP.has(key), `${key} overlaps STOP`);
+    assert(!GENERIC_CLUSTER.has(key), `${key} overlaps GENERIC_CLUSTER`);
+  }
+  for (const generic of ["ドラマ", "ニュース", "映画", "リーグ"]) {
+    assert(!APPROVED_IDENTITY_KEYS.has(generic), `${generic} entered the approved identity dictionary`);
   }
 });
