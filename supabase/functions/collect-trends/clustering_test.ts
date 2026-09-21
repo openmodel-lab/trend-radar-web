@@ -1,4 +1,5 @@
 import {
+  APPROVED_IDENTITY_KEYS,
   matchesEventDefinition,
   priorityEventCluster,
   selectCluster,
@@ -177,5 +178,66 @@ Deno.test("24 ambiguous unprefixed key is not made eligible by one member", () =
     assert(!semanticKeyEligible(key), `${key} became eligible`);
     const result = selectCluster(title, [candidate(`${key} 最新情報`, key)]);
     assert(result.cluster_method !== "semantic_key_v01", `one member made ${key} reproducible`);
+  }
+});
+
+Deno.test("25 approved identities inherit only through the semantic title gate", () => {
+  const cases: [string, string][] = [
+    ["【鳥谷敬】阪神時代の思い出を語る", "鳥谷敬"],
+    ["ロシア、停戦案を発表 プーチン大統領が会見", "ロシア"],
+    ["平野レミ 新レシピを披露", "平野レミ"],
+    ["池上彰がニュースを解説", "池上彰"],
+    ["小栗旬 主演作を発表", "小栗旬"],
+    ["武井壮 スポーツ界を語る", "武井壮"],
+    ["田中碧 次戦へ意欲", "田中碧"],
+    ["唐田えりか 新作映画に出演", "唐田えりか"],
+    ["二階堂ふみ 新ドラマ主演", "二階堂ふみ"],
+    ["トヨタ 新型車を発表", "トヨタ"],
+    ["テスラ 新モデルを公開", "テスラ"],
+    ["科捜研の女 新シリーズ放送決定", "科捜研の女"],
+    ["遊戯王 新カードを発表", "遊戯王"],
+    ["北朝鮮 ミサイルを発射", "北朝鮮"],
+    ["横浜市 新制度を発表", "横浜市"],
+  ];
+  for (const [title, key] of cases) {
+    assert(APPROVED_IDENTITY_KEYS.has(key), `${key} is missing from the approved identity dictionary`);
+    expectInherited(title, key, `${key} 最新情報`);
+  }
+  expectInherited("【鳥谷敬】阪神時代の思い出を語る", "entity:鳥谷敬", "鳥谷敬 最新情報");
+});
+
+Deno.test("26 approved identity fallback does not admit unapproved generic keys", () => {
+  const cases: [string, string][] = [
+    ["リーグ", "サッカーリーグ 最新情報"],
+    ["劇場版", "劇場版 アニメ公開"],
+    ["メイン", "メインイベント 発表"],
+    ["ドラマ", "韓国ドラマ 新作"],
+    ["番組", "音楽番組 放送決定"],
+    ["大会", "卓球大会 日程"],
+    ["選挙", "知事選挙 最新情勢"],
+    ["事件", "事件 最新情報"],
+    ["台風", "台風 接近"],
+    ["映画", "映画 公開日"],
+    ["ニュース", "ニュース 速報"],
+    ["歳以上", "65歳以上を対象"],
+    ["旅客機", "旅客機が緊急着陸"],
+    ["漁船に", "漁船に貨物船が衝突"],
+  ];
+  for (const [key, title] of cases) {
+    assert(!APPROVED_IDENTITY_KEYS.has(key), `${key} entered the approved identity dictionary`);
+    const result = selectCluster(title, [candidate(title, key)]);
+    assert(result.cluster_key !== key || result.cluster_method !== "semantic_key_v01", `${key} inherited as a semantic cluster`);
+  }
+});
+
+Deno.test("27 dictionary presence cannot bypass semanticKeyMatches", () => {
+  const result = selectCluster("高橋一生 主演ドラマ", [candidate("BE:FIRST 新曲", "鳥谷敬")]);
+  assert(result.cluster_key !== "鳥谷敬", "approved identity bypassed the semantic title gate");
+});
+
+Deno.test("28 initial approved identity dictionary contains only reviewed entries", () => {
+  assert(APPROVED_IDENTITY_KEYS.size === 64, `unexpected approved identity count: ${APPROVED_IDENTITY_KEYS.size}`);
+  for (const held of ["エホバ", "レアル", "民主党"]) {
+    assert(!APPROVED_IDENTITY_KEYS.has(held), `${held} should remain on hold`);
   }
 });

@@ -85,6 +85,20 @@ export function clusterText(s: string) {
     .replace(/\s+/g, " ").trim();
 }
 
+// Manually approved, stable identities used only as an additional eligibility
+// signal. A key in this set must still pass semanticKeyMatches() for the
+// incoming title before an existing cluster can be inherited.
+export const APPROVED_IDENTITY_KEYS = new Set([
+  "ガチ夢中", "きゅるりんってしてみて", "佐々木彩乃", "森崎ウィン", "神谷そら", "天皇杯", "八つ墓村",
+  "starto", "いきものがかり", "ジダン", "セウタ", "テスラ", "ドイツ", "トヨタ", "ドル円", "ハワイ",
+  "マルイ", "ロシア", "ロシア下院選", "綾瀬はるかさん", "宇賀なつみ", "横浜市", "岡崎市", "科捜研の女",
+  "外山斎", "外務省", "希良梨", "貴景勝", "鬼連チャン", "宮崎県", "京極町", "競馬ラボ", "玉ノ井親方",
+  "金近廉", "源治麿", "虎テレ", "資さんうどん", "小栗旬", "小糸川", "小田ときと", "常磐線", "新幹線",
+  "西田たかのり", "青森市", "千葉市", "大橋信", "大島町", "大友愛", "池上彰", "鳥谷敬", "天草灘",
+  "田中碧", "唐田えりか", "藤ノ川", "二階堂ふみ", "武井壮", "福澤朗", "平野レミ", "北極圏", "北朝鮮",
+  "遊戯王", "태풍 두쥐안", "超特急", "朝乃山",
+].map(clusterText));
+
 export function compactNormalized(s: string) {
   return clusterText(s).replace(/[\s・･·:：_\-‐‑‒–—―/／|｜.。]+/g, "");
 }
@@ -275,6 +289,7 @@ export function semanticKeyEligible(key: string) {
   const meaning = clusterText(suffix.replace(/_/g, " "));
   const compact = compactNormalized(meaning);
   if (!semanticPhraseEligible(meaning)) return false;
+  if (APPROVED_IDENTITY_KEYS.has(meaning)) return true;
   if (ALIAS_TARGETS.has(meaning)) return true;
 
   // Eligibility is derived only from the key itself. Unknown short/common terms
