@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { selectCluster } from "./clustering.ts";
+import { clusterAssignmentForTopic, selectCluster } from "./clustering.ts";
 const SB_URL=Deno.env.get("SUPABASE_URL")!;
 const SECRET_KEYS=JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS")||"{}");
 const SECRET=SECRET_KEYS.default||Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
@@ -144,20 +144,7 @@ async function topic(title:string,source:string,score:number,meta:any={}){
  const k=key(title);
  const existing=await rest(`trend_topics?topic_key=eq.${encodeURIComponent(k)}&select=*`,{method:"GET"});
  const old=existing?.[0]||{};
- const detected=await findCluster(title);
- const oldKey=String(old.cluster_key||""),oldMethod=String(old.cluster_method||"");
- const newKey=String((detected as any).cluster_key||""),newMethod=String((detected as any).cluster_method||"");
- const oldHardStable=/^(event:|series:)/.test(oldKey)||/^(audit_|manual_repair_|event_child_)/.test(oldMethod);
- const oldEntityStable=/^entity:/.test(oldKey);
- const newIsEvent=/^event:/.test(newKey)||/^event_child_/.test(newMethod);
- let cluster:any=detected;
- // Stable clusters must not drift back to heuristic/anchor matches on later collections.
- // Entity parents may still be promoted to an explicit event child, but otherwise remain stable.
- if(oldKey&&((oldHardStable&&newKey!==oldKey)||(oldEntityStable&&!newIsEvent&&newKey!==oldKey))){
-  cluster={cluster_key:old.cluster_key,cluster_label:old.cluster_label||old.cluster_key,cluster_method:old.cluster_method||"stable_existing",cluster_confidence:Number(old.cluster_confidence||1)}
- }else if(oldKey&&newKey===oldKey&&(oldHardStable||oldEntityStable)){
-  cluster={...detected,cluster_key:old.cluster_key,cluster_label:old.cluster_label||((detected as any).cluster_label||old.cluster_key),cluster_method:old.cluster_method||((detected as any).cluster_method||"stable_existing"),cluster_confidence:Number(old.cluster_confidence||((detected as any).cluster_confidence||1))}
- }
+ const cluster:any=await clusterAssignmentForTopic(existing?.[0],()=>findCluster(title));
  const g=source==="google"?score:Number(old.google_score||0);
  const y=source==="youtube"?score:Number(old.youtube_score||0);
  const n=source==="news"?score:Number(old.news_score||0);

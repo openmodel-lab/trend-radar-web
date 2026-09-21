@@ -14,6 +14,14 @@ export type ClusterResult = {
   parent_label?: string;
 };
 
+export type ExistingClusterState = {
+  cluster_key?: string | null;
+  cluster_label?: string | null;
+  cluster_method?: string | null;
+  cluster_confidence?: number | null;
+  metadata?: Record<string, unknown> | null;
+};
+
 export type EventDefinition = {
   key: string;
   label: string;
@@ -385,4 +393,19 @@ export function selectCluster(title: string, candidates: readonly ClusterCandida
     };
   }
   return { cluster_key: c, cluster_label: c, cluster_method: "heuristic_v05", cluster_confidence: 1 };
+}
+
+export async function clusterAssignmentForTopic(
+  existing: ExistingClusterState | null | undefined,
+  assignNew: () => Promise<ClusterResult>,
+) {
+  if (!existing) return await assignNew();
+  return {
+    cluster_key: existing.cluster_key ?? null,
+    cluster_label: existing.cluster_label ?? null,
+    cluster_method: existing.cluster_method ?? null,
+    cluster_confidence: existing.cluster_confidence ?? null,
+    parent_key: existing.metadata?.parent_key,
+    parent_label: existing.metadata?.parent_label,
+  };
 }

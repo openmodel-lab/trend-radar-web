@@ -2,6 +2,7 @@ import {
   APPROVED_IDENTITY_KEYS,
   GENERIC_CLUSTER,
   STOP,
+  clusterAssignmentForTopic,
   matchesEventDefinition,
   priorityEventCluster,
   selectCluster,
@@ -260,4 +261,78 @@ Deno.test("29 approved identity dictionary cannot overlap STOP or GENERIC_CLUSTE
   for (const generic of ["ドラマ", "ニュース", "映画", "リーグ"]) {
     assert(!APPROVED_IDENTITY_KEYS.has(generic), `${generic} entered the approved identity dictionary`);
   }
+});
+
+Deno.test("30 existing topic preserves its complete cluster assignment", async () => {
+  let assignmentCalled = false;
+  const existing = {
+    cluster_key: "期間限定",
+    cluster_label: "日本武道館",
+    cluster_method: "anchor_v06",
+    cluster_confidence: 0.76,
+    metadata: { parent_key: "legacy:parent", parent_label: "既存親" },
+  };
+  const result = await clusterAssignmentForTopic(existing, async () => {
+    assignmentCalled = true;
+    return selectCluster("🚩9月21日（期間限定）ano Live BD", [candidate("期間限定", "期間限定")]);
+  });
+  assert(!assignmentCalled, "existing topic was reclustered");
+  assert(result.cluster_key === existing.cluster_key, "existing cluster_key changed");
+  assert(result.cluster_label === existing.cluster_label, "existing cluster_label changed");
+  assert(result.cluster_method === existing.cluster_method, "existing cluster_method changed");
+  assert(result.parent_key === "legacy:parent" && result.parent_label === "既存親", "existing parent metadata changed");
+});
+
+Deno.test("31 prefixless legacy and approved identity clusters are preserved", async () => {
+  for (const existing of [
+    { cluster_key: "スーパー", cluster_label: "スーパー", cluster_method: "heuristic_v06", cluster_confidence: 1 },
+    { cluster_key: "鳥谷敬", cluster_label: "鳥谷敬", cluster_method: "heuristic_v05", cluster_confidence: 1 },
+  ]) {
+    let assignmentCalled = false;
+    const result = await clusterAssignmentForTopic(existing, async () => {
+      assignmentCalled = true;
+      return selectCluster(existing.cluster_key, []);
+    });
+    assert(!assignmentCalled, `${existing.cluster_key} was reclustered`);
+    assert(result.cluster_key === existing.cluster_key, `${existing.cluster_key} changed`);
+    assert(result.cluster_method === existing.cluster_method, `${existing.cluster_key} method changed`);
+  }
+});
+
+Deno.test("32 new topic still uses semantic assignment", async () => {
+  let assignmentCalled = false;
+  const result = await clusterAssignmentForTopic(null, async () => {
+    assignmentCalled = true;
+    return selectCluster("鳥谷敬 阪神時代を語る", [candidate("鳥谷敬 最新情報", "鳥谷敬")]);
+  });
+  assert(assignmentCalled, "new topic skipped semantic assignment");
+  assert(result.cluster_key === "鳥谷敬" && result.cluster_method === "semantic_key_v01", "new identity did not inherit");
+});
+
+Deno.test("33 new-topic boundary preserves normal identities and pollution rejection", async () => {
+  const normal: [string, string][] = [
+    ["鳥谷敬 阪神時代を語る", "鳥谷敬"],
+    ["ロシア 停戦案を発表", "ロシア"],
+    ["平野レミ 新レシピを披露", "平野レミ"],
+    ["トヨタ 新型車を発表", "トヨタ"],
+    ["テスラ 新モデルを公開", "テスラ"],
+  ];
+  for (const [title, key] of normal) {
+    const result = await clusterAssignmentForTopic(null, async () => selectCluster(title, [candidate(`${key} 最新情報`, key)]));
+    assert(result.cluster_key === key && result.cluster_method === "semantic_key_v01", `${key} new topic did not inherit`);
+  }
+
+  const polluted: [string, ClusterCandidate[], string][] = [
+    ["高橋一生 主演ドラマ", [candidate("BE:FIRST・LEO、高橋一生主演ドラマで共演", "entity:be_first")], "entity:be_first"],
+    ["ジブリパーク 新エリア", [candidate("ジブリパーク 新エリア", "entity:愛知名古屋アジア大会")], "entity:愛知名古屋アジア大会"],
+    ["イラン 米国との戦闘終結条件を提示", [candidate("イラン 米国との戦闘終結条件を提示", "event:semiconductor_capacity")], "event:semiconductor_capacity"],
+  ];
+  for (const [title, candidates, rejectedKey] of polluted) {
+    const result = await clusterAssignmentForTopic(null, async () => selectCluster(title, candidates));
+    assert(result.cluster_key !== rejectedKey, `${title} inherited polluted ${rejectedKey}`);
+    assert(result.cluster_method === "heuristic_v05", `${title} did not create a new heuristic cluster`);
+  }
+
+  const event = await clusterAssignmentForTopic(null, async () => selectCluster("トランプ氏とグリーンランドを巡り協議", []));
+  assert(event.cluster_key === "event:trump_greenland" && event.cluster_method === "event_child_v01", "new event did not use priorityEventCluster");
 });
