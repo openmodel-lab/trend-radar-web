@@ -336,3 +336,63 @@ Deno.test("33 new-topic boundary preserves normal identities and pollution rejec
   const event = await clusterAssignmentForTopic(null, async () => selectCluster("トランプ氏とグリーンランドを巡り協議", []));
   assert(event.cluster_key === "event:trump_greenland" && event.cluster_method === "event_child_v01", "new event did not use priorityEventCluster");
 });
+
+Deno.test("34 anchor and mixed-script shapes alone are not eligibility routes", () => {
+  for (const key of ["期間限定商品", "キャラクタートレーラー", "商品abc新作"]) {
+    assert(!semanticKeyEligible(key), `${key} became eligible from text shape alone`);
+    const result = selectCluster(`${key} 詳細発表`, [candidate(`${key} 最新情報`, key)]);
+    assert(result.cluster_method === "heuristic_v05", `${key} was revived by similarity or anchors`);
+  }
+});
+
+Deno.test("35 known generic and headline-fragment keys cannot inherit semantically", () => {
+  const cases: [string, string][] = [
+    ["スーパー", "スーパー高校生が大会で優勝"],
+    ["モーニング", "羽鳥慎一モーニングショー"],
+    ["time", "TIME 最新号を発売"],
+    ["チャレンジ", "5000チャレンジ開催"],
+    ["ラグビー", "ラグビー日本代表が勝利"],
+    ["週間天気予報", "週間天気予報 シルバーウィークは晴天"],
+    ["台風情報", "台風情報 進路と暴風域"],
+    ["メガバンクは金利", "メガバンクは金利0.5%に"],
+    ["極右政党またも躍進へ", "極右政党またも躍進へ 地方選結果"],
+    ["露下院選の最終日", "露下院選の最終日 首都周辺で攻撃"],
+    ["小笠原慎之介が", "小笠原慎之介が救援で復帰へ"],
+    ["北朝鮮が弾道ミサイルの可能性あるものを発射", "北朝鮮が弾道ミサイルの可能性あるものを発射 防衛省発表"],
+    ["酒酔い運転の事故に巻き込まれた男児死亡", "酒酔い運転の事故に巻き込まれた男児死亡 容疑者を逮捕"],
+  ];
+  for (const [key, title] of cases) {
+    assert(!semanticKeyEligible(key), `${key} remained eligible`);
+    const result = selectCluster(title, [candidate(title, key)]);
+    assert(result.cluster_method === "heuristic_v05", `${key} was revived after eligibility rejection`);
+  }
+});
+
+Deno.test("36 approved identity and alias routes survive strict eligibility", () => {
+  const approved: [string, string][] = [
+    ["鳥谷敬", "【鳥谷敬】阪神時代を語る"], ["ロシア", "ロシアが停戦案を発表"],
+    ["平野レミ", "平野レミ 新レシピ"], ["トヨタ", "トヨタ 新型車"],
+    ["テスラ", "テスラ 新モデル"], ["池上彰", "池上彰が解説"],
+    ["小栗旬", "小栗旬 主演作"], ["武井壮", "武井壮が語る"],
+    ["田中碧", "田中碧 次戦へ"], ["二階堂ふみ", "二階堂ふみ 新作"],
+    ["科捜研の女", "科捜研の女 新シリーズ"], ["遊戯王", "遊戯王 新カード"],
+    ["北朝鮮", "北朝鮮 ミサイル発射"], ["横浜市", "横浜市 新制度"],
+  ];
+  for (const [key, title] of approved) expectInherited(title, key, `${key} 最新情報`);
+
+  const aliases: [string, string, string][] = [
+    ["snow man", "Snow Man 新曲発表", "Snow Man 最新情報"],
+    ["マインクラフト", "マイクラ 新アップデート", "マインクラフト 最新情報"],
+    ["日銀", "日銀 利上げを決定", "日本銀行 最新情報"],
+    ["東京ゲームショウ2026", "東京ゲームショウ2026 開幕", "TGS2026 最新情報"],
+  ];
+  for (const [key, title, existingTitle] of aliases) expectInherited(title, key, existingTitle);
+});
+
+Deno.test("37 unapproved prefixless identities split safely while typed routes remain explicit", () => {
+  const unapproved = selectCluster("渋野日向子 大会結果", [candidate("渋野日向子 最新情報", "渋野日向子")]);
+  assert(unapproved.cluster_method === "heuristic_v05", "unapproved prefixless identity inherited semantically");
+
+  expectInherited("BE:FIRST 新曲公開", "entity:be_first", "BE:FIRST 最新情報");
+  expectInherited("SURGE Town 新イベント", "series:surge_town", "SURGE Town 最新情報");
+});

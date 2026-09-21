@@ -300,11 +300,11 @@ export function semanticKeyEligible(key: string) {
   if (APPROVED_IDENTITY_KEYS.has(meaning)) return true;
   if (ALIAS_TARGETS.has(meaning)) return true;
 
-  // Eligibility is derived only from the key itself. Unknown short/common terms
-  // have no independent identity signal and therefore remain legacy/UNKNOWN.
-  const identityAnchors = anchors(meaning);
-  const mixedScript = /[a-z0-9]/i.test(compact) && /[一-龯ぁ-んァ-ヶー]/.test(compact);
-  return identityAnchors.length > 0 || mixedScript;
+  // Only explicit typed routes may use an otherwise unregistered key. The
+  // minimum compact length keeps weak typed legacy keys such as entity:ドラマ
+  // and series:番組 stopped without making text shape an eligibility route for
+  // unprefixed keys.
+  return /^(entity|series):/.test(key) && compact.length >= 4;
 }
 
 function asymmetricContains(title: string, phrase: string) {
