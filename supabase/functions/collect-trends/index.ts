@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { selectCluster } from "./clustering.ts";
 const SB_URL=Deno.env.get("SUPABASE_URL")!;
 const SECRET_KEYS=JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS")||"{}");
 const SECRET=SECRET_KEYS.default||Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
@@ -134,32 +135,8 @@ function priorityEventCluster(title:string){
  return null
 }
 async function findCluster(title:string){
- const forced=priorityEventCluster(title);if(forced)return{cluster_key:forced.cluster_key,cluster_label:forced.cluster_label,cluster_method:"event_child_v01",cluster_confidence:1,parent_key:forced.parent_key,parent_label:forced.parent_label};
- const c=canonical(title),recent=await rest("trend_topics?select=id,title,cluster_key,cluster_label&order=last_seen_at.desc&limit=300",{method:"GET"});
- let best:any=null,bestScore=0,bestAnchor=0;
- for(const r of recent||[]){
-  const rc=canonical(r.title),aScore=anchorSimilarity(title,r.title);
-  const cGeneric=genericKey(c),rcGeneric=genericKey(rc);
-  const sim=similarity(title,r.title);
-  let sc=(!cGeneric&&!rcGeneric&&(r.cluster_key===c||rc===c))?1:sim;
-  if(!cGeneric&&c.length>=4&&clusterText(r.title).includes(c))sc=Math.max(sc,.85);
-  if(!rcGeneric&&rc.length>=4&&clusterText(title).includes(rc))sc=Math.max(sc,.85);
-  // Generic/short keys may merge only when the full titles are strongly similar or a strong anchor exists.
-  if(cGeneric||rcGeneric)sc=Math.max(aScore,sim>=.75?sim:0);
-  sc=Math.max(sc,aScore);
-  if(sc>bestScore){best=r;bestScore=sc;bestAnchor=aScore}
- }
- if(best&&bestScore>=0.45){
-  const stableKey=String(best.cluster_key||"");
-  const stableLabel=/^(series|entity|event):/.test(stableKey);
-  const label=stableLabel
-    ? (best.cluster_label||canonical(best.title))
-    : bestAnchor>=0.72
-      ? (anchorLabel(title,best.title)||best.cluster_label||canonical(best.title))
-      : (best.cluster_label||canonical(best.title));
-  return{cluster_key:best.cluster_key||canonical(best.title),cluster_label:label,cluster_method:bestAnchor>=0.72?"anchor_v06":"heuristic_v06",cluster_confidence:Math.round(bestScore*100)/100}
- }
- return{cluster_key:c,cluster_label:c,cluster_method:"heuristic_v05",cluster_confidence:1}
+ const recent=await rest("trend_topics?select=id,title,cluster_key,cluster_label&order=last_seen_at.desc&limit=300",{method:"GET"});
+ return selectCluster(title,recent||[])
 }
 function num(s:string){const m=s.replace(/,/g,"").toUpperCase().match(/([0-9.]+)\s*([KMB万億]?)/);if(!m)return null;let n=+m[1];if(m[2]==="K")n*=1e3;if(m[2]==="M")n*=1e6;if(m[2]==="B")n*=1e9;if(m[2]==="万")n*=1e4;if(m[2]==="億")n*=1e8;return n}
 async function rest(path:string,init:RequestInit={}){if(!SECRET)throw new Error("server secret unavailable");const h=new Headers(init.headers);h.set("apikey",SECRET);h.set("Authorization",`Bearer ${SECRET}`);h.set("Content-Type","application/json");const r=await fetch(`${SB_URL}/rest/v1/${path}`,{...init,headers:h});if(!r.ok)throw new Error(`${r.status} ${await r.text()}`);const t=await r.text();return t?JSON.parse(t):null}
