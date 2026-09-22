@@ -1,5 +1,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { clusterAssignmentForTopic, selectCluster } from "./clustering.ts";
+import {
+  signalEventRow,
+  signalEventTypes,
+  type SignalState,
+} from "./history.ts";
 const SB_URL=Deno.env.get("SUPABASE_URL")!;
 const SECRET_KEYS=JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS")||"{}");
 const SECRET=SECRET_KEYS.default||Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")||"";
@@ -164,13 +169,13 @@ async function youtube(){if(!YOUTUBE_API_KEY)throw new Error("YOUTUBE_API_KEY un
 async function rescore(){
  const cutoff=new Date(Date.now()-24*60*60*1000).toISOString();
  const [rows,obsRows]=await Promise.all([
-  rest("trend_topics?select=id,title,cluster_key,cluster_label,google_score,youtube_score,news_score",{method:"GET"}),
+  rest("trend_topics?select=id,title,cluster_key,cluster_label,cluster_method,cluster_confidence,metadata,google_score,youtube_score,news_score,cluster_google_score,cluster_youtube_score,cluster_news_score,cluster_source_count,cluster_trend_score,velocity_1h,early_signal_score,early_signal_level,propagation_path",{method:"GET"}),
   rest(`trend_observations?select=topic_id,source,source_score,url,raw_data,observed_at&observed_at=gte.${encodeURIComponent(cutoff)}`,{method:"GET"})
  ]);
  const groups=new Map<string,any[]>(),obsByTopic=new Map<number,any[]>();
  for(const row of rows||[]){const k=row.cluster_key||("topic:"+row.id);const a=groups.get(k)||[];a.push(row);groups.set(k,a)}
  for(const o of obsRows||[]){const a=obsByTopic.get(Number(o.topic_id))||[];a.push(o);obsByTopic.set(Number(o.topic_id),a)}
- let c=0;
+ let c=0;const signalCandidates:SignalState[]=[];
  for(const [k,members] of groups){
   // Rebuild current source strength strictly from observations inside the 24h window.
   // Do not use retained topic-level source scores here, because those can outlive the dashboard window.
@@ -216,9 +221,19 @@ async function rescore(){
   for(const m of members){const l=String(m.cluster_label||"").trim();if(l)labelCounts.set(l,(labelCounts.get(l)||0)+1)}
   const snapshotLabel=[...labelCounts.entries()].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0],"ja"))[0]?.[0]||k;
   await rest("trend_cluster_snapshots",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({cluster_key:k,cluster_label:snapshotLabel,trend_score:score,google_score:g,youtube_score:y,news_score:n,source_count:sourceCount})});
-  for(const row of members){await rest(`trend_topics?id=eq.${row.id}`,{method:"PATCH",body:JSON.stringify({cluster_google_score:g,cluster_youtube_score:y,cluster_news_score:n,cluster_source_count:sourceCount,cluster_trend_score:score,velocity_1h:velocity,early_signal_score:early,early_signal_level:level,propagation_path:propagation})});c++}
+  for(const row of members){
+   await rest(`trend_topics?id=eq.${row.id}`,{method:"PATCH",body:JSON.stringify({cluster_google_score:g,cluster_youtube_score:y,cluster_news_score:n,cluster_source_count:sourceCount,cluster_trend_score:score,velocity_1h:velocity,early_signal_score:early,early_signal_level:level,propagation_path:propagation})});c++;
+   const wasActive=String(row.early_signal_level||"none")!=="none"||Number(row.cluster_trend_score||0)>=60;
+   const isActive=level!=="none"||score>=60;
+   if(wasActive||isActive)signalCandidates.push({
+    topic_id:Number(row.id),cluster_key:row.cluster_key??null,cluster_label:row.cluster_label??null,cluster_method:row.cluster_method??null,
+    trend_score:score,early_signal_score:early,early_signal_level:level,velocity_1h:velocity,propagation_path:propagation,is_now:score>=60,
+    google_score:g,news_score:n,youtube_score:y,source_count:sourceCount,evidence_score:null,evidence_level:null,evidence_source_count:null,
+    google_count:null,news_count:null,youtube_count:null,cluster_snapshot_id:null
+   })
+  }
  }
- return c
+ return{count:c,signalCandidates}
 }
 
 const RELEVANCE_WINDOW_HOURS=24;
@@ -292,6 +307,29 @@ async function evidence(){
  return{topics:rows.length}
 }
 
+async function persistSignalEvents(candidates:SignalState[]){
+ if(!candidates.length)return{events:0};
+ const ids=[...new Set(candidates.map(x=>x.topic_id))];
+ const filter=`in.(${ids.join(",")})`;
+ const [historyRows,evidenceRows]=await Promise.all([
+  rest(`topic_signal_events?topic_id=${filter}&select=id,topic_id,cluster_key,cluster_label,cluster_method,trend_score,early_signal_score,early_signal_level,velocity_1h,propagation_path,is_now,google_score,news_score,youtube_score,source_count,evidence_score,evidence_level,evidence_source_count,google_count,news_count,youtube_count,cluster_snapshot_id,observed_at&order=observed_at.desc,id.desc`,{method:"GET"}),
+  rest(`topic_evidence?topic_id=${filter}&select=topic_id,evidence_score,evidence_level,source_count,google_count,news_count,youtube_count`,{method:"GET"})
+ ]);
+ const latest=new Map<number,{eventId:number;state:SignalState}>();
+ for(const row of historyRows||[]){const id=Number(row.topic_id);if(!latest.has(id))latest.set(id,{eventId:Number(row.id),state:row as SignalState})}
+ const evidenceByTopic=new Map<number,any>((evidenceRows||[]).map((row:any)=>[Number(row.topic_id),row]));
+ const observedAt=new Date().toISOString(),eventRows:any[]=[];
+ for(const candidate of candidates){
+  const e=evidenceByTopic.get(candidate.topic_id);
+  const current:SignalState={...candidate,evidence_score:e?.evidence_score==null?null:Number(e.evidence_score),evidence_level:e?.evidence_level??null,evidence_source_count:e?.source_count==null?null:Number(e.source_count),google_count:e?.google_count==null?null:Number(e.google_count),news_count:e?.news_count==null?null:Number(e.news_count),youtube_count:e?.youtube_count==null?null:Number(e.youtube_count)};
+  const previous=latest.get(candidate.topic_id);
+  const event=signalEventRow(current,signalEventTypes(previous?.state||null,current),observedAt,previous?.eventId||0);
+  if(event)eventRows.push(event)
+ }
+ if(eventRows.length)await rest("topic_signal_events?on_conflict=topic_id,previous_event_id,event_fingerprint",{method:"POST",headers:{Prefer:"resolution=ignore-duplicates,return=minimal"},body:JSON.stringify(eventRows)});
+ return{events:eventRows.length}
+}
+
 
 const CRON_TOKEN_SHA256="effaf6f60c8e45cc921f5a4137a9483e78432fbfe7e2df99d485fb79230d483d";
 async function authorizedCronRequest(req:Request){
@@ -305,4 +343,4 @@ async function authorizedCronRequest(req:Request){
   return hex===CRON_TOKEN_SHA256;
 }
 
-Deno.serve(async req=>{if(req.method!=="POST")return new Response("POST only",{status:405});if(!(await authorizedCronRequest(req)))return new Response("Forbidden",{status:403});const results=[await run("google",trends),await run("news",news),await run("youtube",youtube)];const rescored=await rescore();let evidenceResult:any;try{const e=await evidence();evidenceResult={status:"success",...e};}catch(e){evidenceResult={status:"error",error:String(e)};}return Response.json({ok:results.some(x=>x.status==="success"),results,rescored,evidence:evidenceResult,relevance:{status:"deferred",function:"update-relevance"},at:new Date().toISOString()})});
+Deno.serve(async req=>{if(req.method!=="POST")return new Response("POST only",{status:405});if(!(await authorizedCronRequest(req)))return new Response("Forbidden",{status:403});const results=[await run("google",trends),await run("news",news),await run("youtube",youtube)];const rescoreResult=await rescore();let evidenceResult:any,signalHistory:any={status:"skipped"};try{const e=await evidence();evidenceResult={status:"success",...e};try{signalHistory={status:"success",...await persistSignalEvents(rescoreResult.signalCandidates)}}catch(e){signalHistory={status:"error",error:String(e)}}}catch(e){evidenceResult={status:"error",error:String(e)};}return Response.json({ok:results.some(x=>x.status==="success"),results,rescored:rescoreResult.count,evidence:evidenceResult,signal_history:signalHistory,relevance:{status:"deferred",function:"update-relevance"},at:new Date().toISOString()})});
