@@ -3,10 +3,10 @@ import {
   activeLeaseOwner,
   buildRelevanceBatch,
   createCursor,
-  decodeCursor,
   encodeCursor,
   expiredRelevanceIds,
   normalizeBatchSize,
+  parseCursorInput,
   persistRelevanceBatch,
   planRelevancePersistence,
   RELEVANCE_WINDOW_HOURS,
@@ -173,12 +173,11 @@ Deno.serve(async (req) => {
     // Empty bodies use safe defaults.
   }
   const limit = normalizeBatchSize(body.limit);
-  const suppliedCursor = body.cursor == null || body.cursor === ""
-    ? null
-    : decodeCursor(body.cursor);
-  if (body.cursor != null && body.cursor !== "" && !suppliedCursor) {
+  const parsedCursor = parseCursorInput(body.cursor);
+  if (!parsedCursor.valid) {
     return Response.json({ ok: false, error: "invalid cursor" }, { status: 400 });
   }
+  const suppliedCursor = parsedCursor.cursor;
   const cutoff = suppliedCursor?.cutoff ||
     new Date(Date.now() - RELEVANCE_WINDOW_HOURS * 60 * 60 * 1000)
       .toISOString();

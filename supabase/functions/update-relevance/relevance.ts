@@ -79,6 +79,17 @@ export function decodeCursor(value: unknown): RelevanceCursor | null {
   }
 }
 
+export function parseCursorInput(value: unknown): {
+  valid: boolean;
+  cursor: RelevanceCursor | null;
+} {
+  if (value == null || value === "" || value === 0) {
+    return { valid: true, cursor: null };
+  }
+  const cursor = decodeCursor(value);
+  return { valid: cursor != null, cursor };
+}
+
 export function createCursor(cutoff: string, topics: Topic[], lastId = 0): RelevanceCursor {
   const maxId = (topics || []).reduce(
     (max, topic) => Math.max(max, Number(topic.id) || 0),

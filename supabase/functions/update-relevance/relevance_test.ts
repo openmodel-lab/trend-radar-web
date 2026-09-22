@@ -5,6 +5,7 @@ import {
   decodeCursor,
   encodeCursor,
   expiredRelevanceIds,
+  parseCursorInput,
   type PersistenceAdapter,
   persistRelevanceBatch,
   planRelevancePersistence,
@@ -32,6 +33,42 @@ function row(overrides: Partial<RelevanceRow> = {}): RelevanceRow {
     ...overrides,
   };
 }
+
+Deno.test("omitted cursor starts the initial batch", () => {
+  const parsed = parseCursorInput(undefined);
+  assert(parsed.valid && parsed.cursor === null, "omitted cursor was not accepted");
+});
+
+Deno.test("null cursor starts the initial batch", () => {
+  const parsed = parseCursorInput(null);
+  assert(parsed.valid && parsed.cursor === null, "null cursor was not accepted");
+});
+
+Deno.test("zero cursor starts the initial batch", () => {
+  const parsed = parseCursorInput(0);
+  assert(parsed.valid && parsed.cursor === null, "zero cursor was not accepted");
+});
+
+Deno.test("opaque cursor continues a run and invalid opaque cursor is rejected", () => {
+  const cursor = {
+    version: 1 as const,
+    cutoff: "2026-09-21T00:00:00.000Z",
+    maxId: 50,
+    lastId: 25,
+  };
+  const parsed = parseCursorInput(encodeCursor(cursor));
+  assert(parsed.valid, "valid opaque cursor was rejected");
+  assert(parsed.cursor?.lastId === 25, "opaque cursor did not preserve continuation state");
+  assert(!parseCursorInput("not-an-opaque-cursor").valid, "invalid opaque cursor was accepted");
+});
+
+Deno.test("cursor validation remains before lease acquisition", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const validation = source.indexOf("const parsedCursor = parseCursorInput(body.cursor)");
+  const lease = source.indexOf("runId = await acquireLease");
+  assert(validation >= 0, "cursor validation is missing");
+  assert(lease > validation, "lease is acquired before cursor validation");
+});
 
 Deno.test("collect-trends does not execute relevance synchronously", async () => {
   const source = await Deno.readTextFile(
