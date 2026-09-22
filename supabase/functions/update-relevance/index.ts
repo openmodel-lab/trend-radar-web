@@ -1,12 +1,21 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import {
+  activeLeaseOwner,
   buildRelevanceBatch,
+  createCursor,
+  decodeCursor,
+  encodeCursor,
+  expiredRelevanceIds,
   normalizeBatchSize,
   persistRelevanceBatch,
   planRelevancePersistence,
   RELEVANCE_WINDOW_HOURS,
   type RelevanceRow,
 } from "./relevance.ts";
+
+const LEASE_MS = 3 * 60 * 1000;
+const CLEANUP_PAGE_SIZE = 1000;
+const DELETE_CHUNK_SIZE = 200;
 
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const SECRET_KEYS = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") || "{}");
@@ -47,17 +56,28 @@ async function authorizedCronRequest(req: Request) {
   return hex === CRON_TOKEN_SHA256;
 }
 
-async function recordRun(
+async function startRun(metadata: Record<string, unknown>) {
+  const rows = await rest("collector_runs", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ source: "relevance", status: "running", metadata }),
+  });
+  const id = Number(rows?.[0]?.id);
+  if (!Number.isSafeInteger(id)) throw new Error("failed to create relevance run");
+  return id;
+}
+
+async function finishRun(
+  id: number,
   status: "success" | "error",
   items: number,
   metadata: Record<string, unknown>,
   error?: unknown,
 ) {
-  await rest("collector_runs", {
-    method: "POST",
+  await rest(`collector_runs?id=eq.${id}`, {
+    method: "PATCH",
     headers: { Prefer: "return=minimal" },
     body: JSON.stringify({
-      source: "relevance",
       status,
       finished_at: new Date().toISOString(),
       items_fetched: items,
@@ -65,6 +85,24 @@ async function recordRun(
       metadata,
     }),
   });
+}
+
+async function acquireLease(metadata: Record<string, unknown>) {
+  const now = Date.now();
+  const id = await startRun({
+    ...metadata,
+    lease_expires_at: new Date(now + LEASE_MS).toISOString(),
+  });
+  const running = await rest(
+    "collector_runs?select=id,metadata&source=eq.relevance&status=eq.running&order=id.asc",
+    { method: "GET" },
+  );
+  const owner = activeLeaseOwner(running || [], now);
+  if (owner !== id) {
+    await finishRun(id, "success", 0, { ...metadata, skipped: "overlap" });
+    return null;
+  }
+  return id;
 }
 
 const RELEVANCE_SELECT =
@@ -100,6 +138,28 @@ async function existingRowsForBatch(topicIds: number[], clusterKeys: string[]) {
   return (await Promise.all(requests)).flat();
 }
 
+async function allRelevanceSubjects() {
+  const rows: RelevanceRow[] = [];
+  for (let offset = 0;; offset += CLEANUP_PAGE_SIZE) {
+    const page = await rest(
+      `relevance_results?select=id,subject_type,topic_id,cluster_key&order=id.asc&limit=${CLEANUP_PAGE_SIZE}&offset=${offset}`,
+      { method: "GET" },
+    );
+    rows.push(...(page || []));
+    if (!page || page.length < CLEANUP_PAGE_SIZE) return rows;
+  }
+}
+
+async function deleteRelevanceIds(ids: number[]) {
+  for (let offset = 0; offset < ids.length; offset += DELETE_CHUNK_SIZE) {
+    const chunk = ids.slice(offset, offset + DELETE_CHUNK_SIZE);
+    await rest(`relevance_results?id=in.(${chunk.join(",")})`, {
+      method: "DELETE",
+      headers: { Prefer: "return=minimal" },
+    });
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return new Response("POST only", { status: 405 });
   if (!(await authorizedCronRequest(req))) {
@@ -113,11 +173,26 @@ Deno.serve(async (req) => {
     // Empty bodies use safe defaults.
   }
   const limit = normalizeBatchSize(body.limit);
-  const cursor = Math.max(0, Math.trunc(Number(body.cursor || 0)));
-  const cutoff = new Date(Date.now() - RELEVANCE_WINDOW_HOURS * 60 * 60 * 1000)
-    .toISOString();
+  const suppliedCursor = body.cursor == null || body.cursor === ""
+    ? null
+    : decodeCursor(body.cursor);
+  if (body.cursor != null && body.cursor !== "" && !suppliedCursor) {
+    return Response.json({ ok: false, error: "invalid cursor" }, { status: 400 });
+  }
+  const cutoff = suppliedCursor?.cutoff ||
+    new Date(Date.now() - RELEVANCE_WINDOW_HOURS * 60 * 60 * 1000)
+      .toISOString();
+  const lastId = suppliedCursor?.lastId || 0;
+  let runId: number | null = null;
 
   try {
+    runId = await acquireLease({ cursor: body.cursor || null, limit, cutoff });
+    if (runId == null) {
+      return Response.json({ ok: false, status: "busy", retryable: true }, {
+        status: 409,
+      });
+    }
+    const maxIdFilter = suppliedCursor ? `&id=lte.${suppliedCursor.maxId}` : "";
     const [allRules, entities, topics] = await Promise.all([
       rest(
         "watch_rules?select=id,rule_type,value,relevance_domain,category_key,match_terms,strong_terms,enabled&enabled=eq.true",
@@ -130,7 +205,7 @@ Deno.serve(async (req) => {
       rest(
         `trend_topics?select=id,title,cluster_key,cluster_label,last_seen_at&last_seen_at=gte.${
           encodeURIComponent(cutoff)
-        }&order=id.asc`,
+        }${maxIdFilter}&order=id.asc`,
         { method: "GET" },
       ),
     ]);
@@ -140,12 +215,16 @@ Deno.serve(async (req) => {
     const excludes = (allRules || []).filter((rule: any) =>
       rule.rule_type === "exclude"
     );
+    if (rules.length === 0 && (entities || []).length === 0) {
+      throw new Error("no enabled relevance definitions");
+    }
+    const runCursor = suppliedCursor || createCursor(cutoff, topics || []);
     const batch = buildRelevanceBatch({
       topics: topics || [],
       rules,
       entities: entities || [],
       excludes,
-      cursor,
+      cursor: lastId,
       limit,
     });
     const existingRows = await existingRowsForBatch(
@@ -174,12 +253,28 @@ Deno.serve(async (req) => {
         });
       },
       async deleteByIds(ids: number[]) {
-        await rest(`relevance_results?id=in.(${ids.join(",")})`, {
-          method: "DELETE",
-          headers: { Prefer: "return=minimal" },
-        });
+        await deleteRelevanceIds(ids);
       },
     });
+    let removedExpired = 0;
+    if (!batch.hasMore) {
+      const existingSubjects = await allRelevanceSubjects();
+      const activeTopicIds = (topics || []).map((topic: any) => Number(topic.id));
+      const activeClusterKeys: string[] = [...new Set<string>(
+        (topics || []).map((topic: any) => String(topic.cluster_key || ""))
+          .filter(Boolean),
+      )];
+      const expiredIds = expiredRelevanceIds(
+        existingSubjects,
+        activeTopicIds,
+        activeClusterKeys,
+      );
+      await deleteRelevanceIds(expiredIds);
+      removedExpired = expiredIds.length;
+    }
+    const nextCursor = batch.hasMore
+      ? encodeCursor({ ...runCursor, lastId: batch.nextCursor })
+      : null;
     const result = {
       status: "success",
       selected: batch.selected,
@@ -188,21 +283,30 @@ Deno.serve(async (req) => {
       updated: plan.updates.length,
       inserted: plan.inserts.length,
       removed_stale: plan.staleIds.length,
-      next_cursor: batch.nextCursor,
+      removed_expired: removedExpired,
+      next_cursor: nextCursor,
+      cursor_last_id: batch.nextCursor,
       has_more: batch.hasMore,
       remaining: batch.remaining,
       limit,
       window_hours: RELEVANCE_WINDOW_HOURS,
     };
-    await recordRun("success", batch.rows.length, result);
+    await finishRun(runId, "success", batch.rows.length, result);
     return Response.json({ ok: true, ...result });
   } catch (error) {
-    await recordRun("error", 0, {
-      cursor,
+    if (runId != null) {
+      await finishRun(runId, "error", 0, {
+        cursor: body.cursor || null,
+        limit,
+        window_hours: RELEVANCE_WINDOW_HOURS,
+      }, error).catch(() => {});
+    }
+    return Response.json({
+      ok: false,
+      error: String(error),
+      cursor: body.cursor || null,
       limit,
-      window_hours: RELEVANCE_WINDOW_HOURS,
-    }, error).catch(() => {});
-    return Response.json({ ok: false, error: String(error), cursor, limit }, {
+    }, {
       status: 500,
     });
   }

@@ -1,5 +1,10 @@
 import {
+  activeLeaseOwner,
   buildRelevanceBatch,
+  createCursor,
+  decodeCursor,
+  encodeCursor,
+  expiredRelevanceIds,
   type PersistenceAdapter,
   persistRelevanceBatch,
   planRelevancePersistence,
@@ -89,6 +94,27 @@ Deno.test("relevance processing advances in bounded topic batches", () => {
   );
 });
 
+Deno.test("opaque cursor preserves the run cutoff and high-water mark", () => {
+  const topics = Array.from({ length: 60 }, (_, index) => ({
+    id: index + 1,
+    title: `topic ${index + 1}`,
+    cluster_key: null,
+    cluster_label: null,
+  }));
+  const cursor = createCursor("2026-09-21T00:00:00.000Z", topics);
+  const first = buildRelevanceBatch({ topics, rules: [], entities: [], excludes: [], limit: 50 });
+  const token = encodeCursor({ ...cursor, lastId: first.nextCursor });
+  const decoded = decodeCursor(token)!;
+  assert(decoded.cutoff === cursor.cutoff, "cutoff changed across cursor pages");
+  assert(decoded.maxId === 60 && decoded.lastId === 50, "cursor bounds are incorrect");
+  const second = buildRelevanceBatch({
+    topics: [...topics, { id: 61, title: "late", cluster_key: null, cluster_label: null }]
+      .filter((topic) => topic.id <= decoded.maxId),
+    rules: [], entities: [], excludes: [], limit: 50, cursor: decoded.lastId,
+  });
+  assert(second.selectedTopicIds.join(",") === "51,52,53,54,55,56,57,58,59,60", "cursor skipped or included a late topic");
+});
+
 Deno.test("write failure never reaches stale cleanup", async () => {
   const plan = planRelevancePersistence(
     [row({ id: 9, category_key: "old" })],
@@ -116,12 +142,9 @@ Deno.test("write failure never reaches stale cleanup", async () => {
   assert(deletes === 0, "cleanup ran after a failed write");
 });
 
-Deno.test("empty calculation preserves existing relevance rows", async () => {
+Deno.test("successfully evaluated zero-result subject cleans only its own rows", async () => {
   const plan = planRelevancePersistence([row({ id: 9 })], [], [1], []);
-  assert(
-    plan.staleIds.length === 0,
-    "empty calculation planned destructive cleanup",
-  );
+  assert(plan.staleIds.join(",") === "9", "zero-result subject was not cleaned");
   const calls: string[] = [];
   await persistRelevanceBatch(plan, {
     async upsertById() {
@@ -134,7 +157,46 @@ Deno.test("empty calculation preserves existing relevance rows", async () => {
       calls.push("delete");
     },
   });
-  assert(calls.length === 0, "empty calculation should not write or delete");
+  assert(calls.join("|") === "delete", "zero-result cleanup was not isolated");
+});
+
+Deno.test("subject cleanup never touches another batch or failed subject", () => {
+  const plan = planRelevancePersistence(
+    [row({ id: 9, topic_id: 1 }), row({ id: 10, topic_id: 2 })],
+    [],
+    [1],
+    [],
+  );
+  assert(plan.staleIds.join(",") === "9", "cleanup escaped the completed subject scope");
+});
+
+Deno.test("same batch replay updates existing rows without duplicate insert", () => {
+  const computed = [row({ topic_id: 1 })];
+  const first = planRelevancePersistence([], computed, [1], []);
+  assert(first.inserts.length === 1, "first execution should insert");
+  const saved = [{ ...computed[0], id: 44 }];
+  const replay = planRelevancePersistence(saved, computed, [1], []);
+  assert(replay.updates.length === 1 && replay.inserts.length === 0, "replay is not idempotent");
+});
+
+Deno.test("active lease elects one owner and ignores expired runs", () => {
+  const now = Date.parse("2026-09-22T00:00:00.000Z");
+  const owner = activeLeaseOwner([
+    { id: 8, metadata: { lease_expires_at: "2026-09-21T23:59:00.000Z" } },
+    { id: 10, metadata: { lease_expires_at: "2026-09-22T00:03:00.000Z" } },
+    { id: 11, metadata: { lease_expires_at: "2026-09-22T00:03:00.000Z" } },
+  ], now);
+  assert(owner === 10, "overlapping batches did not elect the oldest active lease");
+});
+
+Deno.test("final sweep removes only subjects outside the active 24 hour set", () => {
+  const expired = expiredRelevanceIds([
+    row({ id: 1, topic_id: 10 }),
+    row({ id: 2, topic_id: 11 }),
+    row({ id: 3, subject_type: "cluster", topic_id: null, cluster_key: "active" }),
+    row({ id: 4, subject_type: "cluster", topic_id: null, cluster_key: "expired" }),
+  ], [10], ["active"]);
+  assert(expired.join(",") === "2,4", `unexpected expired cleanup: ${expired.join(",")}`);
 });
 
 Deno.test("successful writes finish before scoped stale cleanup", async () => {

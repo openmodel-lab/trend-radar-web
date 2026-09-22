@@ -1,6 +1,13 @@
 export const RELEVANCE_WINDOW_HOURS = 24;
-export const DEFAULT_BATCH_SIZE = 75;
+export const DEFAULT_BATCH_SIZE = 50;
 export const MAX_BATCH_SIZE = 100;
+
+export type RelevanceCursor = {
+  version: 1;
+  cutoff: string;
+  maxId: number;
+  lastId: number;
+};
 
 export type Topic = {
   id: number;
@@ -32,6 +39,11 @@ export type PersistencePlan = {
   staleIds: number[];
 };
 
+export type ExistingSubjectRow = Pick<
+  RelevanceRow,
+  "id" | "subject_type" | "topic_id" | "cluster_key"
+>;
+
 export interface PersistenceAdapter {
   upsertById(rows: RelevanceRow[]): Promise<void>;
   insert(rows: RelevanceRow[]): Promise<void>;
@@ -42,6 +54,37 @@ export function normalizeBatchSize(value: unknown) {
   const parsed = Number(value ?? DEFAULT_BATCH_SIZE);
   if (!Number.isFinite(parsed)) return DEFAULT_BATCH_SIZE;
   return Math.max(1, Math.min(MAX_BATCH_SIZE, Math.trunc(parsed)));
+}
+
+export function encodeCursor(cursor: RelevanceCursor) {
+  const json = JSON.stringify(cursor);
+  return btoa(json).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export function decodeCursor(value: unknown): RelevanceCursor | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+    const json = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="));
+    const parsed = JSON.parse(json);
+    if (
+      parsed?.version !== 1 || !Number.isFinite(Date.parse(parsed.cutoff)) ||
+      !Number.isSafeInteger(parsed.maxId) || parsed.maxId < 0 ||
+      !Number.isSafeInteger(parsed.lastId) || parsed.lastId < 0 ||
+      parsed.lastId > parsed.maxId
+    ) return null;
+    return parsed as RelevanceCursor;
+  } catch {
+    return null;
+  }
+}
+
+export function createCursor(cutoff: string, topics: Topic[], lastId = 0): RelevanceCursor {
+  const maxId = (topics || []).reduce(
+    (max, topic) => Math.max(max, Number(topic.id) || 0),
+    0,
+  );
+  return { version: 1, cutoff, maxId, lastId: Math.min(lastId, maxId) };
 }
 
 function relNorm(s: string) {
@@ -309,14 +352,38 @@ export function planRelevancePersistence(
     if (old?.id != null) updates.push({ ...row, id: old.id });
     else inserts.push(row);
   }
-  // An entirely empty calculation never triggers cleanup. This prevents a bad
-  // rules/config response from erasing the last known-good relevance dataset.
-  const staleIds = computedRows.length === 0
-    ? []
-    : scopedExisting.filter((row) =>
-      row.id != null && !computedKeys.has(rowKey(row))
-    ).map((row) => Number(row.id));
+  // Reaching this planner means every scoped subject was evaluated successfully.
+  // A subject with zero matches is therefore a valid empty result and its old
+  // rows are stale. Fetch/config/evaluation failures never reach persistence.
+  const staleIds = scopedExisting.filter((row) =>
+    row.id != null && !computedKeys.has(rowKey(row))
+  ).map((row) => Number(row.id));
   return { updates, inserts, staleIds };
+}
+
+export function expiredRelevanceIds(
+  rows: ExistingSubjectRow[],
+  activeTopicIds: number[],
+  activeClusterKeys: string[],
+) {
+  const topics = new Set(activeTopicIds.map(Number));
+  const clusters = new Set(activeClusterKeys.map(String));
+  return (rows || []).filter((row) => {
+    if (row.id == null) return false;
+    return row.subject_type === "topic"
+      ? !topics.has(Number(row.topic_id))
+      : !clusters.has(String(row.cluster_key || ""));
+  }).map((row) => Number(row.id));
+}
+
+export function activeLeaseOwner(
+  rows: Array<{ id: number; metadata?: Record<string, unknown> | null }>,
+  nowMs: number,
+) {
+  return (rows || []).filter((row) => {
+    const expires = Date.parse(String(row.metadata?.lease_expires_at || ""));
+    return Number.isFinite(expires) && expires > nowMs;
+  }).sort((a, b) => Number(a.id) - Number(b.id))[0]?.id ?? null;
 }
 
 export async function persistRelevanceBatch(
